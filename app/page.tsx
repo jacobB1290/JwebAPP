@@ -6,21 +6,20 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 // TYPES
 // ═══════════════════════════════════════════
 
-interface AiInsert {
+interface StreamItem {
   id?: string
-  type: 'annotation' | 'conversational'
+  type: 'writing' | 'ai-annotation' | 'ai-conversational'
   content: string
   tone?: string
   linked_entry_id?: string | null
   tool_call?: any
-  timestamp: number
 }
 
 interface AppState {
   authed: boolean
   loading: boolean
   entryId: string | null
-  aiInserts: AiInsert[]
+  stream: StreamItem[]
   busy: boolean
   greetingVisible: boolean
   greeting: string
@@ -31,7 +30,6 @@ interface AppState {
   theme: 'light' | 'dark'
   error: string | null
   entryTitle: string | null
-  inputFocused: boolean
 }
 
 // ═══════════════════════════════════════════
@@ -144,46 +142,27 @@ function chartColor(i: number, a: number) {
 }
 
 // ═══════════════════════════════════════════
-// AI INSERT RENDERERS
+// SIDE PANEL WITH DELETE
 // ═══════════════════════════════════════════
 
-function AiAnnotation({ item, onLoadEntry }: { item: AiInsert; onLoadEntry: (id: string) => void }) {
-  return (
-    <div className="ai-annotation" onClick={e => e.stopPropagation()}>
-      <div className="anno-accent" />
-      <div className="anno-inner">
-        <div className="anno-content">{item.content}</div>
-        {item.linked_entry_id && (
-          <span className="anno-link" onClick={() => onLoadEntry(item.linked_entry_id!)}>see related entry</span>
-        )}
-        {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} />}
-      </div>
-    </div>
-  )
-}
-
-function AiConversational({ item, onLoadEntry }: { item: AiInsert; onLoadEntry: (id: string) => void }) {
-  return (
-    <div className="ai-conversational" onClick={e => e.stopPropagation()}>
-      <div className="conv-marker">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4" /></svg>
-      </div>
-      <div className="conv-content">{item.content}</div>
-      {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} />}
-    </div>
-  )
-}
-
-// ═══════════════════════════════════════════
-// SIDE PANEL
-// ═══════════════════════════════════════════
-
-function SidePanel({ open, onClose, onLoadEntry }: { open: boolean; onClose: () => void; onLoadEntry: (id: string) => void }) {
+function SidePanel({ open, onClose, onLoadEntry, onDeleteEntry }: { open: boolean; onClose: () => void; onLoadEntry: (id: string) => void; onDeleteEntry: (id: string) => void }) {
   const [entries, setEntries] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
-  useEffect(() => { if (open) loadEntries() }, [open])
+  useEffect(() => { if (open) { loadEntries(); setConfirmDelete(null) } }, [open])
   const loadEntries = async () => { setLoading(true); try { const r = await fetch('/api/entries'); if (r.ok) { const d = await r.json(); setEntries(d.entries || []) } } catch {} setLoading(false) }
+
+  const doDelete = async (id: string) => {
+    try {
+      const res = await fetch(`/api/entries/${id}`, { method: 'DELETE' })
+      if (res.ok) {
+        setEntries(prev => prev.filter(e => e.id !== id))
+        setConfirmDelete(null)
+        onDeleteEntry(id)
+      }
+    } catch {}
+  }
 
   const grouped: Record<string, any[]> = {}
   const uncategorized: any[] = []
@@ -203,23 +182,30 @@ function SidePanel({ open, onClose, onLoadEntry }: { open: boolean; onClose: () 
           {Object.entries(grouped).map(([folder, ents]) => (
             <div key={folder} className="fgrp">
               <div className="fname"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>{folder}</div>
-              {ents.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} />)}
+              {ents.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}
             </div>
           ))}
-          {uncategorized.length > 0 && <div className="fgrp"><div className="fname">Uncategorized</div>{uncategorized.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} />)}</div>}
+          {uncategorized.length > 0 && <div className="fgrp"><div className="fname">Uncategorized</div>{uncategorized.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}</div>}
         </div>
       </div>
     </>
   )
 }
 
-function EntryCard({ entry, onClick }: { entry: any; onClick: () => void }) {
+function EntryCard({ entry, onClick, onDelete, confirming }: { entry: any; onClick: () => void; onDelete: () => void; confirming: boolean }) {
   const date = new Date(entry.created_at || entry.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
   const tags = [...(entry.emotion_tags || []).slice(0, 2), ...(entry.topic_tags || []).slice(0, 2)]
   return (
-    <div className="ecard" onClick={onClick}>
-      <div className="ecard-t">{entry.title || 'Untitled'}</div>
-      <div className="ecard-meta"><span className="ecard-date">{date}</span>{tags.map((t: string, i: number) => <span key={i} className="tag">{t}</span>)}</div>
+    <div className="ecard">
+      <div className="ecard-main" onClick={onClick}>
+        <div className="ecard-t">{entry.title || 'Untitled'}</div>
+        <div className="ecard-meta"><span className="ecard-date">{date}</span>{tags.map((t: string, i: number) => <span key={i} className="tag">{t}</span>)}</div>
+      </div>
+      <button className={`ecard-del ${confirming ? 'confirming' : ''}`} onClick={(e) => { e.stopPropagation(); onDelete() }} title={confirming ? 'Tap again to confirm' : 'Delete entry'}>
+        {confirming
+          ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+          : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>}
+      </button>
     </div>
   )
 }
@@ -230,32 +216,26 @@ function EntryCard({ entry, onClick }: { entry: any; onClick: () => void }) {
 
 export default function Home() {
   const [state, setState] = useState<AppState>({
-    authed: false, loading: true, entryId: null, aiInserts: [],
+    authed: false, loading: true, entryId: null, stream: [],
     busy: false, greetingVisible: true, greeting: '',
     recentEntryId: null, recentEntryTopic: null,
     continuationChecked: false, panelOpen: false,
     theme: 'light', error: null, entryTitle: null,
-    inputFocused: false,
   })
 
-  // The user's continuous writing — ONE textarea, never fragmented
-  const [writing, setWriting] = useState('')
+  const [input, setInput] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const autoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastSentRef = useRef('') // tracks what text has already been sent to the model
-  const busyRef = useRef(false) // avoids stale closures
-  const canvasRef = useRef<HTMLDivElement>(null)
-  const aiZoneRef = useRef<HTMLDivElement>(null)
+  const lastSentRef = useRef('')
+  const allTextRef = useRef('') // all user text accumulated
+  const busyRef = useRef(false)
+  const streamEndRef = useRef<HTMLDivElement>(null)
 
   const s = useCallback((update: Partial<AppState> | ((prev: AppState) => AppState)) => {
-    if (typeof update === 'function') {
-      setState(update)
-    } else {
-      setState(prev => ({ ...prev, ...update }))
-    }
+    if (typeof update === 'function') setState(update)
+    else setState(prev => ({ ...prev, ...update }))
   }, [])
 
-  // Keep busyRef in sync
   useEffect(() => { busyRef.current = state.busy }, [state.busy])
 
   // ─── Theme ───
@@ -293,31 +273,29 @@ export default function Home() {
     s({ theme: next })
   }
 
-  // ─── Focus input — the core UX fix ───
-  // Tapping anywhere on the canvas focuses the writing area
+  const scrollToBottom = () => { setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 80) }
+
   const focusInput = useCallback(() => {
-    if (state.greetingVisible) {
-      s({ greetingVisible: false })
-    }
-    // Small delay to let greeting fade start, then focus
-    setTimeout(() => {
-      if (inputRef.current) {
-        inputRef.current.focus()
-        // On mobile, scroll to input if needed
-        inputRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-      }
-    }, 50)
+    if (state.greetingVisible) s({ greetingVisible: false })
+    setTimeout(() => inputRef.current?.focus(), 50)
   }, [state.greetingVisible, s])
 
   // ─── New entry ───
   const newEntry = () => {
-    s({ entryId: null, aiInserts: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null })
+    s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null })
     lastSentRef.current = ''
-    setWriting('')
+    allTextRef.current = ''
+    setInput('')
     setTimeout(() => inputRef.current?.focus(), 100)
   }
 
-  // ─── Load existing entry ───
+  // ─── Delete handler (called from panel) ───
+  const onDeleteEntry = (id: string) => {
+    // If we're viewing the deleted entry, reset to blank
+    if (state.entryId === id) newEntry()
+  }
+
+  // ─── Load existing entry — rebuild as interleaved stream ───
   const loadEntry = async (entryId: string) => {
     try {
       const res = await fetch(`/api/entries/${entryId}`)
@@ -325,49 +303,38 @@ export default function Home() {
       const data = await res.json()
       if (!data.entry) return
 
-      // Reconstruct: user messages become the writing text, AI messages become inserts
-      const userTexts: string[] = []
-      const inserts: AiInsert[] = []
+      // Convert messages to stream items IN ORDER (preserving the interleaving)
+      const items: StreamItem[] = (data.messages || []).map((m: any) => ({
+        id: m.id,
+        type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
+        content: m.content,
+        tone: m.tone,
+        linked_entry_id: m.linked_entry_id,
+        tool_call: m.tool_call,
+      }))
 
-      for (const m of (data.messages || [])) {
-        if (m.sender === 'user') {
-          userTexts.push(m.content)
-        } else {
-          inserts.push({
-            id: m.id,
-            type: m.message_type === 'annotation' ? 'annotation' : 'conversational',
-            content: m.content,
-            tone: m.tone,
-            linked_entry_id: m.linked_entry_id,
-            tool_call: m.tool_call,
-            timestamp: new Date(m.created_at || Date.now()).getTime(),
-          })
-        }
-      }
+      // Rebuild allTextRef from user messages
+      allTextRef.current = items.filter(i => i.type === 'writing').map(i => i.content).join('\n\n')
+      lastSentRef.current = allTextRef.current
 
-      const fullText = userTexts.join('\n\n')
-      setWriting(fullText)
-      lastSentRef.current = fullText
+      setInput('')
       s({
         entryId,
-        aiInserts: inserts,
+        stream: items,
         panelOpen: false,
         error: null,
         greetingVisible: false,
         entryTitle: data.entry.title || null,
+        continuationChecked: true, // Don't re-check continuation for loaded entries
       })
       setTimeout(() => {
+        scrollToBottom()
         inputRef.current?.focus()
-        // Move cursor to end
-        if (inputRef.current) {
-          inputRef.current.selectionStart = inputRef.current.value.length
-          inputRef.current.selectionEnd = inputRef.current.value.length
-        }
       }, 100)
     } catch {}
   }
 
-  // ─── Continuation check (runs once on first text) ───
+  // ─── Continuation check ───
   const checkContinuation = async (text: string) => {
     if (state.continuationChecked || !text.trim()) return
     s({ continuationChecked: true })
@@ -375,62 +342,51 @@ export default function Home() {
       const res = await fetch('/api/continuation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) })
       const data = await res.json()
       if (data.isContinuation && data.entryId) {
-        // Load the continued entry's AI inserts, and prepend previous user text
-        const userTexts: string[] = []
-        const inserts: AiInsert[] = []
-        for (const m of (data.messages || [])) {
-          if (m.sender === 'user') userTexts.push(m.content)
-          else inserts.push({
-            id: m.id,
-            type: m.message_type === 'annotation' ? 'annotation' : 'conversational',
-            content: m.content, tone: m.tone, linked_entry_id: m.linked_entry_id, tool_call: m.tool_call,
-            timestamp: new Date(m.created_at || Date.now()).getTime(),
-          })
-        }
-        // Prepend old text to current writing
-        const oldText = userTexts.join('\n\n')
-        const combined = oldText ? oldText + '\n\n' + text : text
-        setWriting(combined)
-        lastSentRef.current = oldText // Only the old text has been "sent" already
-        s({ entryId: data.entryId, aiInserts: inserts, entryTitle: data.entry?.title || null })
+        const items: StreamItem[] = (data.messages || []).map((m: any) => ({
+          id: m.id,
+          type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
+          content: m.content, tone: m.tone, linked_entry_id: m.linked_entry_id, tool_call: m.tool_call,
+        }))
+        allTextRef.current = items.filter(i => i.type === 'writing').map(i => i.content).join('\n\n')
+        lastSentRef.current = allTextRef.current
+        s({ entryId: data.entryId, stream: items, entryTitle: data.entry?.title || null })
+        scrollToBottom()
       }
     } catch {}
   }
 
-  // ─── Send new text to LLM ───
-  // This is the KEY design change: the user's textarea is NEVER cleared.
-  // We just silently send the delta (new text since last send) to the backend.
-  // The user keeps writing. AI inserts appear in a separate zone below.
-  const sendToModel = async (currentText: string, userRequested: boolean) => {
-    if (busyRef.current) return
+  // ─── Commit current input into the stream and send to model ───
+  const sendToModel = async (userRequested: boolean) => {
+    const text = input.trim()
+    if (busyRef.current || !text) return
 
-    const delta = currentText.slice(lastSentRef.current.length).trim()
-    if (!delta && !userRequested) return
+    // Commit the current input as a writing block in the stream
+    const writingItem: StreamItem = { type: 'writing', content: text }
+    const newStream = [...state.stream, writingItem]
 
-    const textToSend = delta || currentText.trim()
-    s({ busy: true, error: null })
+    // Update tracking
+    allTextRef.current = (allTextRef.current ? allTextRef.current + '\n\n' : '') + text
+    const delta = text // The input IS the delta since it was last cleared
+
+    setInput('')
+    s({ busy: true, error: null, stream: newStream })
+    scrollToBottom()
 
     try {
-      // Build session context from existing AI inserts (recent)
-      const recentInserts = state.aiInserts.slice(-10).map(i => ({
-        sender: 'ai',
+      // Build session context from recent stream
+      const recentContext = newStream.slice(-15).map(i => ({
+        sender: i.type === 'writing' ? 'user' : 'ai',
         content: i.content,
-        type: i.type,
+        type: i.type === 'writing' ? 'user_message' : i.type === 'ai-annotation' ? 'annotation' : 'conversational',
       }))
-
-      // Also include a summary of user's writing as context
-      const sessionMessages = [
-        ...recentInserts,
-        { sender: 'user', content: textToSend, type: 'user_message' },
-      ]
 
       const res = await fetch('/api/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: textToSend,
+          text: delta,
           entryId: state.entryId,
-          sessionMessages,
+          sessionMessages: recentContext,
           userRequestedResponse: userRequested,
         }),
       })
@@ -443,129 +399,98 @@ export default function Home() {
 
       const data = await res.json()
 
-      // Build new AI inserts
-      const newInserts: AiInsert[] = (data.responses || [])
-        .filter((r: any) => r.content?.trim())
-        .map((r: any) => ({
-          id: r.id,
-          type: r.type === 'annotation' ? 'annotation' as const : 'conversational' as const,
-          content: r.content,
-          tone: r.tone,
-          linked_entry_id: r.linked_entry_id,
-          timestamp: Date.now(),
-        }))
+      // Build AI stream items — these go INLINE right after the writing block
+      const aiItems: StreamItem[] = (data.responses || []).filter((r: any) => r.content?.trim()).map((r: any) => ({
+        id: r.id,
+        type: r.type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
+        content: r.content,
+        tone: r.tone,
+        linked_entry_id: r.linked_entry_id,
+      }))
 
-      // Attach tool call to last insert
-      if (data.toolCall && newInserts.length > 0) {
-        newInserts[newInserts.length - 1].tool_call = data.toolCall
-      } else if (data.toolCall && newInserts.length === 0) {
-        newInserts.push({ type: 'annotation', content: '', tool_call: data.toolCall, timestamp: Date.now() })
+      // Attach tool call to LAST AI item only
+      if (data.toolCall && aiItems.length > 0) {
+        aiItems[aiItems.length - 1].tool_call = data.toolCall
+      } else if (data.toolCall && aiItems.length === 0) {
+        aiItems.push({ type: 'ai-annotation', content: '', tool_call: data.toolCall })
       }
 
-      // Update state — AI inserts appear, user's text stays exactly as-is
       s(prev => ({
         ...prev,
         entryId: data.entryId,
         entryTitle: data.entryTitle || prev.entryTitle,
-        aiInserts: [...prev.aiInserts, ...newInserts],
+        stream: [...prev.stream, ...aiItems],
         busy: false,
       }))
 
-      // Mark current text as "sent"
-      lastSentRef.current = currentText
-
-      // Scroll to show new AI inserts if any
-      if (newInserts.length > 0) {
-        setTimeout(() => {
-          aiZoneRef.current?.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-        }, 100)
-      }
+      lastSentRef.current = allTextRef.current
+      if (aiItems.length > 0) scrollToBottom()
     } catch {
       s({ busy: false, error: 'Network error — check your connection' })
     }
   }
 
-  // ─── Auto-trigger logic ───
+  // ─── Auto-trigger ───
   const resetAutoTrigger = () => {
     if (autoTimerRef.current) { clearTimeout(autoTimerRef.current); autoTimerRef.current = null }
   }
 
-  const startAutoTrigger = (fullText: string) => {
+  const startAutoTrigger = (text: string) => {
     resetAutoTrigger()
-    if (!fullText.trim() || fullText === lastSentRef.current) return
-
-    // Determine delay based on whether the user just finished a sentence
-    const trimmed = fullText.trimEnd()
+    if (!text.trim()) return
+    const trimmed = text.trimEnd()
     const lastChar = trimmed.charAt(trimmed.length - 1)
     const endsSentence = ['.', '!', '?'].includes(lastChar)
-    const delay = endsSentence ? 3000 : 8000 // 3s after sentence end, 8s otherwise
+    const delay = endsSentence ? 3000 : 8000
 
     autoTimerRef.current = setTimeout(() => {
-      // Re-check: only send if there's new unsent text and we're not busy
-      const currentText = inputRef.current?.value || ''
-      if (currentText.trim() && currentText !== lastSentRef.current && !busyRef.current) {
-        sendToModel(currentText, false) // auto-trigger = NOT user requested
+      const current = inputRef.current?.value?.trim() || ''
+      if (current && !busyRef.current) {
+        sendToModel(false) // auto = not user requested
       }
     }, delay)
   }
 
-  // ─── Input change handler ───
-  const onWritingChange = (val: string) => {
-    setWriting(val)
-
-    // Fade greeting on first keystroke
-    if (state.greetingVisible && val.trim()) {
-      s({ greetingVisible: false })
-    }
-
-    // Check continuation on first few words (once)
+  // ─── Input change ───
+  const onInputChange = (val: string) => {
+    setInput(val)
+    if (state.greetingVisible && val.trim()) s({ greetingVisible: false })
     if (!state.continuationChecked && val.trim().split(/\s+/).length >= 4) {
       checkContinuation(val.trim())
     }
-
-    // Start/reset auto-trigger
     startAutoTrigger(val)
   }
 
-  // ─── Manual send (Ctrl+Enter or button) ───
+  // ─── Manual send ───
   const manualSend = () => {
     resetAutoTrigger()
-    const text = writing.trim()
-    if (!text || state.busy) return
-    sendToModel(writing, true) // user requested = true → AI WILL respond
+    if (!input.trim() || state.busy) return
+    sendToModel(true)
   }
 
-  // ─── Auto-resize textarea ───
+  // ─── Auto-resize ───
   useEffect(() => {
     if (inputRef.current) {
       inputRef.current.style.height = 'auto'
-      const scrollHeight = inputRef.current.scrollHeight
-      // Let it grow freely — this IS the journal page
-      inputRef.current.style.height = scrollHeight + 'px'
+      inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 300) + 'px'
     }
-  }, [writing])
+  }, [input])
 
   // ─── Render ───
   if (state.loading) {
     return <div className="login-screen"><div className="thinking" style={{ justifyContent: 'center' }}><span className="t-dot" /><span className="t-dot" /><span className="t-dot" /></div></div>
   }
 
-  if (!state.authed) {
-    return <LoginScreen onLogin={onLogin} />
-  }
-
-  const hasNewText = writing.trim() && writing !== lastSentRef.current
+  if (!state.authed) return <LoginScreen onLogin={onLogin} />
 
   return (
-    <div id="app">
+    <div id="app" onClick={focusInput}>
       {/* Top Bar */}
-      <div id="topbar">
+      <div id="topbar" onClick={e => e.stopPropagation()}>
         <button className="tbtn" onClick={newEntry} title="New entry">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
         </button>
-        {state.entryTitle && (
-          <div className="topbar-title">{state.entryTitle}</div>
-        )}
+        {state.entryTitle && <div className="topbar-title">{state.entryTitle}</div>}
         <div className="topbar-right">
           <button className="tbtn" onClick={toggleTheme} title="Toggle theme">
             {state.theme === 'dark'
@@ -578,13 +503,8 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Greeting Overlay */}
-      <div
-        id="greeting-screen"
-        className={!state.greetingVisible ? 'fading' : ''}
-        style={!state.greetingVisible ? { pointerEvents: 'none' } : {}}
-        onClick={focusInput}
-      >
+      {/* Greeting */}
+      <div id="greeting-screen" className={!state.greetingVisible ? 'fading' : ''} style={!state.greetingVisible ? { pointerEvents: 'none' } : {}} onClick={focusInput}>
         <div className="greeting-text">{state.greeting}</div>
         {state.recentEntryId && state.recentEntryTopic && (
           <button className="greeting-continue" onClick={(e) => { e.stopPropagation(); loadEntry(state.recentEntryId!) }}>
@@ -594,60 +514,65 @@ export default function Home() {
         <div className="greeting-hint">Tap anywhere to begin writing</div>
       </div>
 
-      {/* Journal Canvas — this IS the notebook page */}
-      <div id="canvas" ref={canvasRef} onClick={focusInput}>
+      {/* Canvas — the journal page with interleaved writing and AI */}
+      <div id="canvas">
+        <div id="stream">
+          {state.stream.map((item, i) => {
+            if (item.type === 'writing') {
+              return <div key={i} className="si-writing">{item.content}</div>
+            }
+            if (item.type === 'ai-annotation') {
+              return (
+                <div key={item.id || i} className="si-annotation" onClick={e => e.stopPropagation()}>
+                  <div className="anno-bar" />
+                  <div className="anno-body">
+                    {item.content && <div className="anno-text">{item.content}</div>}
+                    {item.linked_entry_id && <span className="anno-link" onClick={() => loadEntry(item.linked_entry_id!)}>see related entry</span>}
+                    {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} />}
+                  </div>
+                </div>
+              )
+            }
+            // ai-conversational
+            return (
+              <div key={item.id || i} className="si-conv" onClick={e => e.stopPropagation()}>
+                <div className="conv-text">{item.content}</div>
+                {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} />}
+              </div>
+            )
+          })}
+        </div>
 
-        {/* THE WRITING AREA — always present, always at top of canvas flow */}
-        <div id="writing-zone" onClick={e => e.stopPropagation()}>
+        {/* Thinking */}
+        {state.busy && <div className="thinking-inline"><span className="t-dot" /><span className="t-dot" /><span className="t-dot" /></div>}
+
+        {/* Live input — always at the bottom of the stream, part of the flow */}
+        <div id="writing-input" onClick={e => e.stopPropagation()}>
           <textarea
             ref={inputRef}
-            id="journal-input"
-            placeholder={state.aiInserts.length > 0 || writing ? "Keep writing..." : "Start writing..."}
-            value={writing}
-            onChange={e => onWritingChange(e.target.value)}
-            onFocus={() => s({ inputFocused: true })}
-            onBlur={() => s({ inputFocused: false })}
+            id="tinput"
+            rows={1}
+            placeholder={state.stream.length === 0 ? "Start writing..." : "Keep writing..."}
+            value={input}
+            onChange={e => onInputChange(e.target.value)}
             onKeyDown={e => {
-              // Ctrl/Cmd+Enter = "pause & reflect" — manual send to get a response
-              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                e.preventDefault()
-                manualSend()
-              }
+              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); manualSend() }
+              if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); manualSend() }
             }}
             disabled={state.busy}
             autoFocus
           />
         </div>
 
-        {/* AI INSERTS — appear below the writing area, like margin notes */}
-        {state.aiInserts.length > 0 && (
-          <div id="ai-zone" ref={aiZoneRef} onClick={e => e.stopPropagation()}>
-            <div className="ai-zone-divider">
-              <span className="divider-line" />
-              <span className="divider-label">notebook</span>
-              <span className="divider-line" />
-            </div>
-            {state.aiInserts.map((item, i) => {
-              if (item.type === 'annotation') return <AiAnnotation key={item.id || i} item={item} onLoadEntry={loadEntry} />
-              return <AiConversational key={item.id || i} item={item} onLoadEntry={loadEntry} />
-            })}
-          </div>
-        )}
-
-        {/* Thinking indicator */}
-        {state.busy && (
-          <div className="thinking-inline" onClick={e => e.stopPropagation()}>
-            <span className="t-dot" /><span className="t-dot" /><span className="t-dot" />
-          </div>
-        )}
-
-        {/* Manual send hint — subtle, only shows when there's unsent text */}
-        {hasNewText && !state.busy && (
+        {/* Send hint */}
+        {input.trim() && !state.busy && (
           <div id="send-hint" onClick={e => { e.stopPropagation(); manualSend() }}>
-            <span className="send-hint-text">press to reflect</span>
-            <span className="send-hint-key">or Ctrl+Enter</span>
+            <span className="send-hint-text">pause & reflect</span>
+            <span className="send-hint-key">Ctrl+Enter</span>
           </div>
         )}
+
+        <div ref={streamEndRef} />
       </div>
 
       {/* Error */}
@@ -658,7 +583,7 @@ export default function Home() {
         </div>
       )}
 
-      <SidePanel open={state.panelOpen} onClose={() => s({ panelOpen: false })} onLoadEntry={loadEntry} />
+      <SidePanel open={state.panelOpen} onClose={() => s({ panelOpen: false })} onLoadEntry={loadEntry} onDeleteEntry={onDeleteEntry} />
 
       <style jsx global>{styles}</style>
     </div>
@@ -696,7 +621,7 @@ body {
   overflow-x: hidden; -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale; -webkit-tap-highlight-color: transparent;
 }
-#app { min-height: 100dvh; }
+#app { min-height: 100dvh; cursor: text; }
 
 .spin { animation: spinAnim 0.8s linear infinite; }
 @keyframes spinAnim { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -726,70 +651,69 @@ body {
 @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ═══ Top Bar ═══ */
-#topbar { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; z-index: 100; padding-top: max(12px, env(safe-area-inset-top)); background: var(--bg); background: linear-gradient(to bottom, var(--bg) 60%, transparent); }
+#topbar { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; z-index: 100; padding-top: max(12px, env(safe-area-inset-top)); background: linear-gradient(to bottom, var(--bg) 60%, transparent); cursor: default; }
 .topbar-title { flex: 1; text-align: center; font-family: 'DM Sans', sans-serif; font-size: 0.7rem; color: var(--text-light); letter-spacing: 0.04em; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
 .topbar-right { display: flex; gap: 2px; }
 .tbtn { background: none; border: none; cursor: pointer; color: var(--text-light); padding: 10px; border-radius: 10px; transition: all 0.25s; opacity: 0.4; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
 .tbtn:hover { opacity: 1; color: var(--text-muted); background: var(--hover-bg); }
 .tbtn:active { opacity: 1; transform: scale(0.92); }
 
-/* ═══ Journal Canvas ═══ */
-#canvas { max-width: 680px; width: 100%; margin: 0 auto; padding: 64px 24px 80px; min-height: 100dvh; cursor: text; }
+/* ═══ Canvas ═══ */
+#canvas { max-width: 680px; width: 100%; margin: 0 auto; padding: 64px 24px 120px; min-height: 100dvh; }
+#stream { display: flex; flex-direction: column; gap: 0; }
 
-/* ═══ Writing Zone — THE notebook page ═══ */
-#writing-zone { cursor: text; }
-#journal-input {
-  width: 100%; border: none; outline: none; background: transparent;
-  font-family: 'Source Serif 4', Georgia, serif; font-size: inherit;
-  color: var(--text); line-height: 1.8; resize: none;
-  min-height: 40vh; overflow: hidden;
-  caret-color: var(--accent);
-}
-#journal-input::placeholder { color: var(--text-light); opacity: 0.4; font-style: italic; }
-#journal-input:disabled { opacity: 0.7; }
+/* ═══ Stream Items — INLINE ═══ */
 
-/* ═══ AI Zone — inserts below the writing ═══ */
-#ai-zone { margin-top: 24px; }
-.ai-zone-divider { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
-.divider-line { flex: 1; height: 1px; background: var(--divider); }
-.divider-label { font-family: 'DM Sans', sans-serif; font-size: 0.6rem; color: var(--text-light); letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.6; flex-shrink: 0; }
+/* User writing — looks like text on a page */
+.si-writing { padding: 0 0 4px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.15s ease; }
 
-/* AI Annotation — margin note with accent bar */
-.ai-annotation { display: flex; gap: 0; margin: 0 0 16px; animation: aiFade 0.5s ease; cursor: default; }
-.anno-accent { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.5; flex-shrink: 0; }
-.anno-inner { padding: 6px 0 6px 16px; font-size: 0.86rem; color: var(--text-muted); line-height: 1.65; }
-.anno-content { white-space: pre-wrap; word-break: break-word; }
+/* AI Annotation — margin note with accent bar, inline in the flow */
+.si-annotation { display: flex; gap: 0; margin: 8px 0 12px; animation: aiFade 0.4s ease; cursor: default; }
+.anno-bar { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.5; flex-shrink: 0; }
+.anno-body { padding: 4px 0 4px 14px; font-size: 0.84rem; color: var(--text-muted); line-height: 1.6; }
+.anno-text { white-space: pre-wrap; word-break: break-word; }
 .anno-link { font-family: 'DM Sans', sans-serif; font-size: 0.68rem; color: var(--accent); cursor: pointer; margin-top: 4px; display: inline-block; text-decoration: underline; text-underline-offset: 2px; opacity: 0.8; }
 .anno-link:hover { opacity: 1; }
 
-/* AI Conversational — gentle card, not a chat bubble */
-.ai-conversational { margin: 0 0 16px; padding: 16px 20px; background: var(--conv-bg); border-radius: 14px; animation: aiFade 0.5s ease; position: relative; cursor: default; }
-.conv-marker { position: absolute; top: -6px; left: 16px; width: 20px; height: 20px; border-radius: 50%; background: var(--bg); border: 2px solid var(--divider); display: flex; align-items: center; justify-content: center; color: var(--accent); }
-.conv-content { white-space: pre-wrap; word-break: break-word; padding-top: 4px; font-size: 0.92rem; }
+/* AI Conversational — gentle inline note, NOT a separate section */
+.si-conv { margin: 10px 0 14px; padding: 14px 18px; background: var(--conv-bg); border-radius: 12px; animation: aiFade 0.4s ease; cursor: default; font-size: 0.92rem; line-height: 1.65; }
+.conv-text { white-space: pre-wrap; word-break: break-word; }
+
+/* ═══ Writing Input ═══ */
+#writing-input { margin-top: 2px; cursor: text; }
+#tinput {
+  width: 100%; border: none; outline: none; background: transparent;
+  font-family: 'Source Serif 4', Georgia, serif; font-size: inherit;
+  color: var(--text); line-height: 1.8; resize: none;
+  min-height: 48px; max-height: 300px; overflow-y: auto;
+  caret-color: var(--accent);
+}
+#tinput::placeholder { color: var(--text-light); opacity: 0.35; font-style: italic; }
+#tinput:disabled { opacity: 0.6; }
 
 /* ═══ Thinking ═══ */
 .thinking, .thinking-inline { display: flex; gap: 5px; padding: 8px 2px; }
-.thinking-inline { margin: 16px 0 8px; cursor: default; }
+.thinking-inline { margin: 8px 0; cursor: default; }
 .t-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: 0.25; animation: breathe 1.4s ease infinite; }
 .t-dot:nth-child(2) { animation-delay: 0.2s; }
 .t-dot:nth-child(3) { animation-delay: 0.4s; }
 @keyframes breathe { 0%,100% { opacity: 0.15; transform: scale(0.8); } 50% { opacity: 0.55; transform: scale(1.15); } }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-@keyframes aiFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes aiFade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ═══ Send Hint ═══ */
 #send-hint {
   display: flex; align-items: center; justify-content: center; gap: 8px;
-  margin-top: 24px; padding: 14px 24px;
-  cursor: pointer; border-radius: 12px;
+  margin-top: 16px; padding: 12px 20px;
+  cursor: pointer; border-radius: 10px;
   background: var(--hover-bg); border: 1px solid var(--divider);
-  transition: all 0.25s; opacity: 0.5;
+  transition: all 0.25s; opacity: 0.4;
   -webkit-tap-highlight-color: transparent;
 }
-#send-hint:hover { opacity: 0.8; background: var(--accent-bg); border-color: var(--accent-light); }
+#send-hint:hover { opacity: 0.7; background: var(--accent-bg); border-color: var(--accent-light); }
 #send-hint:active { transform: scale(0.98); opacity: 1; }
-.send-hint-text { font-family: 'DM Sans', sans-serif; font-size: 0.72rem; color: var(--text-muted); letter-spacing: 0.04em; }
-.send-hint-key { font-family: 'DM Sans', sans-serif; font-size: 0.62rem; color: var(--text-light); background: var(--bg-secondary); padding: 2px 8px; border-radius: 4px; }
+.send-hint-text { font-family: 'DM Sans', sans-serif; font-size: 0.7rem; color: var(--text-muted); letter-spacing: 0.04em; }
+.send-hint-key { font-family: 'DM Sans', sans-serif; font-size: 0.6rem; color: var(--text-light); background: var(--bg-secondary); padding: 2px 7px; border-radius: 4px; }
 
 /* ═══ Error ═══ */
 .error-bar { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--error-bg); color: white; padding: 12px 18px; border-radius: 14px; font-family: 'DM Sans', sans-serif; font-size: 0.82rem; z-index: 60; display: flex; align-items: center; gap: 14px; box-shadow: 0 4px 24px rgba(0,0,0,0.2); animation: aiFade 0.3s ease; max-width: calc(100vw - 32px); cursor: default; }
@@ -798,7 +722,7 @@ body {
 .error-close:hover { opacity: 1; }
 
 /* ═══ Tools ═══ */
-.tool-box { padding: 12px 0 0; }
+.tool-box { padding: 10px 0 0; }
 .tool-head { font-family: 'DM Sans', sans-serif; font-size: 0.72rem; font-weight: 500; color: var(--text-muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
 .tool-chart { max-height: 220px; width: 100%; }
 .tool-tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -840,39 +764,41 @@ body {
 .p-empty { color: var(--text-light); font-size: 0.88rem; padding: 40px 0; text-align: center; line-height: 1.6; }
 .fgrp { margin-bottom: 20px; }
 .fname { font-family: 'DM Sans', sans-serif; font-size: 0.7rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-light); margin-bottom: 6px; padding-left: 4px; display: flex; align-items: center; gap: 6px; }
-.ecard { padding: 12px 14px; border-radius: 12px; cursor: pointer; transition: background 0.15s; margin-bottom: 2px; }
+.ecard { display: flex; align-items: center; border-radius: 12px; transition: background 0.15s; margin-bottom: 2px; }
 .ecard:hover { background: var(--hover-bg); }
-.ecard-t { font-size: 0.92rem; color: var(--text); margin-bottom: 3px; line-height: 1.4; }
+.ecard-main { flex: 1; padding: 12px 8px 12px 14px; cursor: pointer; min-width: 0; }
+.ecard-t { font-size: 0.92rem; color: var(--text); margin-bottom: 3px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ecard-meta { font-family: 'DM Sans', sans-serif; font-size: 0.68rem; color: var(--text-light); display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .ecard-date { white-space: nowrap; }
 .tag { font-family: 'DM Sans', sans-serif; font-size: 0.6rem; background: var(--tag-bg); color: var(--tag-text); padding: 2px 9px; border-radius: 10px; white-space: nowrap; }
+.ecard-del { background: none; border: none; cursor: pointer; color: var(--text-light); padding: 10px; border-radius: 8px; opacity: 0.3; transition: all 0.2s; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+.ecard-del:hover { opacity: 0.7; color: var(--error-bg); }
+.ecard-del.confirming { opacity: 1; color: var(--error-bg); background: rgba(192,57,43,0.1); }
 
 /* ═══ Mobile ═══ */
 @media (max-width: 680px) {
   body { font-size: 16px; }
-  #canvas { padding: 56px 16px 80px; }
+  #canvas { padding: 56px 16px 100px; }
   .greeting-text { font-size: 1.28rem; }
-  .ai-conversational { padding: 14px 16px; border-radius: 12px; }
-  .anno-inner { font-size: 0.82rem; }
+  .si-conv { padding: 12px 14px; border-radius: 10px; }
+  .anno-body { font-size: 0.8rem; }
   #topbar { padding: 10px 12px; padding-top: max(10px, env(safe-area-inset-top)); }
   .tbtn { padding: 12px; }
   .panel { width: 88vw; }
   .p-body { padding: 16px; }
   .tool-chart { max-height: 180px; }
   .topbar-title { font-size: 0.62rem; }
-  #journal-input { min-height: 50vh; }
-  #send-hint { padding: 12px 20px; }
+  #send-hint { padding: 10px 16px; }
 }
 @media (max-width: 380px) {
   body { font-size: 15px; }
-  #canvas { padding: 52px 12px 70px; }
+  #canvas { padding: 52px 12px 90px; }
   .greeting-text { font-size: 1.15rem; }
   .panel { width: 92vw; }
-  #journal-input { min-height: 60vh; }
 }
 @media (min-width: 1024px) {
   body { font-size: 19px; }
-  #canvas { padding: 80px 24px 100px; }
+  #canvas { padding: 80px 24px 120px; }
 }
 
 ::-webkit-scrollbar { width: 4px; }
@@ -884,7 +810,8 @@ body {
   .tbtn:hover, .ecard:hover, .p-close:hover, .login-btn:hover, .greeting-continue:hover { background: initial; opacity: initial; color: initial; transform: initial; }
   .tbtn:active { opacity: 1; background: var(--hover-bg); }
   .ecard:active { background: var(--hover-bg); }
-  #send-hint:hover { opacity: 0.5; background: var(--hover-bg); border-color: var(--divider); }
+  #send-hint:hover { opacity: 0.4; background: var(--hover-bg); border-color: var(--divider); }
   #send-hint:active { opacity: 1; background: var(--accent-bg); border-color: var(--accent-light); }
+  .ecard-del { opacity: 0.5; }
 }
 `

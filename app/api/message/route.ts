@@ -56,7 +56,11 @@ timestamp: ${new Date().toISOString()}`
     const llmResponse = await callLLM(SYSTEM_PROMPT, llmInput)
 
     const responses = llmResponse.responses || []
-    const dbAction = llmResponse.database_action || { type: 'create_new_entry' }
+    // CRITICAL: If entryId was provided, FORCE append — don't let LLM accidentally create a new entry
+    let dbAction = llmResponse.database_action || { type: 'create_new_entry' }
+    if (entryId && dbAction.type === 'create_new_entry') {
+      dbAction = { type: 'append_to_entry', entry_id: entryId, folder_id: null }
+    }
 
     // ─── Ensure folder exists ───
     let folderId: string | null = null
@@ -133,9 +137,12 @@ timestamp: ${new Date().toISOString()}`
     })
 
     // ─── Save AI responses ───
+    // IMPORTANT: tool_call only goes on the LAST AI message, not all of them
+    const validResponses = responses.filter((r: any) => r.content?.trim())
     const savedResponses: any[] = []
-    for (const resp of responses) {
-      if (!resp.content?.trim()) continue
+    for (let idx = 0; idx < validResponses.length; idx++) {
+      const resp = validResponses[idx]
+      const isLast = idx === validResponses.length - 1
       const { data: aiMsg } = await supabase
         .from('messages')
         .insert({
@@ -145,7 +152,7 @@ timestamp: ${new Date().toISOString()}`
           message_type: resp.type || 'conversational',
           tone: resp.tone || null,
           linked_entry_id: resp.linked_entry_id || null,
-          tool_call: llmResponse.tool_call || null,
+          tool_call: isLast ? (llmResponse.tool_call || null) : null,
           position: position++,
         })
         .select('id')

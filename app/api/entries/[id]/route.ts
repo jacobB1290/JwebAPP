@@ -38,3 +38,27 @@ export async function GET(
     return NextResponse.json({ error: 'Failed to load entry' }, { status: 500 })
   }
 }
+
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  if (!validateAuth(request)) return authError()
+
+  try {
+    const { id } = await params
+
+    // Delete messages first (FK constraint)
+    await supabase.from('tool_outputs').delete().in(
+      'message_id',
+      (await supabase.from('messages').select('id').eq('entry_id', id)).data?.map((m: any) => m.id) || []
+    )
+    await supabase.from('messages').delete().eq('entry_id', id)
+    await supabase.from('entries').delete().eq('id', id)
+
+    return NextResponse.json({ success: true })
+  } catch (err: any) {
+    console.error('Entry delete error:', err?.message)
+    return NextResponse.json({ error: 'Failed to delete entry' }, { status: 500 })
+  }
+}
