@@ -238,6 +238,7 @@ export default function Home() {
   const entryIdRef = useRef<string | null>(null)
   const queueRef = useRef<Array<{ text: string; userRequested: boolean; insertIdx: number }>>([])
   const processingRef = useRef(false)
+  const continuationCheckedRef = useRef(false)  // ref mirror to avoid stale closures
 
   const s = useCallback((update: Partial<AppState> | ((prev: AppState) => AppState)) => {
     if (typeof update === 'function') setState(update)
@@ -248,6 +249,7 @@ export default function Home() {
   useEffect(() => { busyRef.current = state.busy }, [state.busy])
   useEffect(() => { streamRef.current = state.stream }, [state.stream])
   useEffect(() => { entryIdRef.current = state.entryId }, [state.entryId])
+  useEffect(() => { continuationCheckedRef.current = state.continuationChecked }, [state.continuationChecked])
 
   // ─── Theme ───
   useEffect(() => {
@@ -296,6 +298,7 @@ export default function Home() {
     lastSentRef.current = ''
     allTextRef.current = ''
     queueRef.current = []
+    continuationCheckedRef.current = false
     setInput('')
     setTimeout(() => inputRef.current?.focus(), 100)
   }
@@ -375,8 +378,17 @@ export default function Home() {
   }
 
   // ─── Continuation check ───
+  // ONLY runs on a BLANK canvas (no entryId, no stream items, first text input).
+  // Once we have an entryId or stream items, this never fires again.
   const checkContinuation = async (text: string) => {
-    if (state.continuationChecked || !text.trim()) return
+    if (continuationCheckedRef.current || !text.trim()) return
+    if (entryIdRef.current || streamRef.current.length > 0) {
+      // Already have an active entry or stream content — skip continuation check
+      continuationCheckedRef.current = true
+      s({ continuationChecked: true })
+      return
+    }
+    continuationCheckedRef.current = true  // set ref immediately to prevent double-fire
     s({ continuationChecked: true })
     try {
       const res = await fetch('/api/continuation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) })
@@ -403,6 +415,12 @@ export default function Home() {
 
   const enqueueMessage = (text: string, userRequested: boolean) => {
     if (!text.trim()) return
+
+    // Once the user has sent a message, continuation check is done — lock it
+    if (!continuationCheckedRef.current) {
+      continuationCheckedRef.current = true
+      s({ continuationChecked: true })
+    }
 
     // Commit the text as a writing block immediately
     const writingItem: StreamItem = { type: 'writing', content: text }
@@ -595,16 +613,18 @@ export default function Home() {
     setInput(val)
     lastKeystrokeRef.current = Date.now()
     if (state.greetingVisible && val.trim()) s({ greetingVisible: false })
-    if (!state.continuationChecked && val.trim().split(/\s+/).length >= 4) {
+    // Only check continuation on a BLANK canvas (no entryId, no stream, first text)
+    if (!continuationCheckedRef.current && !entryIdRef.current && streamRef.current.length === 0 && val.trim().split(/\s+/).length >= 4) {
       checkContinuation(val.trim())
     }
     startAutoTrigger(val)
   }
 
-  // ─── Manual send (Ctrl+Enter / Shift+Enter) ───
+  // ─── Manual send (Ctrl+Enter / Shift+Enter / button) ───
   const manualSend = () => {
     resetAutoTrigger()
-    const text = input.trim()
+    // Read directly from the textarea DOM element to avoid stale React state
+    const text = (inputRef.current?.value || input).trim()
     if (!text) return
     wordCountAtLastSendRef.current = 0
     enqueueMessage(text, true)
