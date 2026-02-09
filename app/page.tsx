@@ -603,7 +603,9 @@ export default function Home() {
       const current = inputRef.current?.value?.trim() || ''
       if (current && !processingRef.current) {
         wordCountAtLastSendRef.current = current.split(/\s+/).length
-        enqueueMessage(current, false)
+        // First message in a session always gets a response (not silent)
+        const isFirstMessage = !entryIdRef.current && streamRef.current.length === 0
+        enqueueMessage(current, isFirstMessage)
       }
     }, delay)
   }
