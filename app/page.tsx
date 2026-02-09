@@ -311,11 +311,27 @@ export default function Home() {
   useEffect(() => { continuationCheckedRef.current = state.continuationChecked }, [state.continuationChecked])
   useEffect(() => { modelRef.current = state.model }, [state.model])
 
-  // ─── Theme ───
+  // ─── Theme — follows system preference, updates live ───
   useEffect(() => {
-    const saved = localStorage.getItem('sn-th')
-    const dark = saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)
-    if (dark) { document.documentElement.setAttribute('data-theme', 'dark'); s({ theme: 'dark' }) }
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+
+    const apply = (dark: boolean) => {
+      if (dark) {
+        document.documentElement.setAttribute('data-theme', 'dark')
+        s({ theme: 'dark' })
+      } else {
+        document.documentElement.removeAttribute('data-theme')
+        s({ theme: 'light' })
+      }
+    }
+
+    // Apply immediately on mount
+    apply(mq.matches)
+
+    // Listen for system changes (e.g. user toggles iOS dark mode)
+    const handler = (e: MediaQueryListEvent) => apply(e.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
   }, [s])
 
   // ─── Auth ───
@@ -354,14 +370,6 @@ export default function Home() {
   const setModel = (id: string) => {
     s({ model: id, modelPickerOpen: false })
     localStorage.setItem('sn-model', id)
-  }
-
-  const toggleTheme = () => {
-    const next = state.theme === 'dark' ? 'light' : 'dark'
-    if (next === 'dark') document.documentElement.setAttribute('data-theme', 'dark')
-    else document.documentElement.removeAttribute('data-theme')
-    localStorage.setItem('sn-th', next)
-    s({ theme: next })
   }
 
   const scrollToBottom = () => { setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 80) }
@@ -794,11 +802,6 @@ export default function Home() {
               </div>
             )}
           </div>
-          <button className="tbtn" onClick={toggleTheme} title="Toggle theme">
-            {state.theme === 'dark'
-              ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" /></svg>
-              : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>}
-          </button>
           <button className="tbtn" onClick={() => s({ panelOpen: true })} title="Browse entries">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" /></svg>
           </button>
