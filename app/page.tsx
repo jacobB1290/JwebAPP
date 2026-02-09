@@ -931,8 +931,9 @@ export default function Home() {
       <div id="canvas">
         <div id="stream">
           {state.stream.map((item, i) => {
-            // Wave-in items: animation starts from opacity:0 (in keyframes)
-            // and forwards fill-mode holds at opacity:1 — no cleanup needed, no flicker
+            // Wave-in items: 'both' fill-mode applies opacity:0 during the delay
+            // period (backwards) and holds opacity:1 after completion (forwards)
+            // No cleanup needed — flags stay forever, animation is inert after finish
             const waveStyle = item.animating && item.waveDelay != null
               ? { animationDelay: `${item.waveDelay}ms` } as React.CSSProperties
               : item.animating
@@ -1264,7 +1265,7 @@ body {
 
 /* User writing — looks like text on a page */
 .si-writing { padding: 0 0 4px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.15s ease; }
-.si-writing.wave-in { animation: waterfallIn 0.4s ease forwards; }
+.si-writing.wave-in { animation: waterfallIn 0.4s ease both; }
 .si-writing.stream-exit { animation: streamExit 0.35s ease forwards; }
 
 /* Merged header — divider when a past entry is pulled into the thread */
@@ -1275,7 +1276,7 @@ body {
   margin: 20px 0 16px;
   cursor: default;
 }
-.si-merge-header.wave-in { animation: waterfallIn 0.4s ease forwards; }
+.si-merge-header.wave-in { animation: waterfallIn 0.4s ease both; }
 .si-merge-header.stream-exit { animation: streamExit 0.35s ease forwards; }
 .merge-line { flex: 1; height: 1px; background: var(--divider); }
 .merge-label {
@@ -1290,7 +1291,7 @@ body {
 
 /* AI Annotation — margin note with accent bar, inline in the flow */
 .si-annotation { display: flex; gap: 0; margin: 8px 0 12px; cursor: default; }
-.si-annotation.wave-in { animation: waterfallIn 0.4s ease forwards; }
+.si-annotation.wave-in { animation: waterfallIn 0.4s ease both; }
 .si-annotation:not(.si-inserting):not(.stream-exit):not(.wave-in) { animation: aiFade 0.4s ease; }
 .si-annotation.stream-exit { animation: streamExit 0.35s ease forwards; }
 .anno-bar { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.5; flex-shrink: 0; }
@@ -1301,7 +1302,7 @@ body {
 
 /* AI Conversational — gentle inline note */
 .si-conv { margin: 10px 0 14px; padding: 14px 18px; background: var(--conv-bg); border-radius: 12px; cursor: default; font-size: 0.92rem; line-height: 1.65; }
-.si-conv.wave-in { animation: waterfallIn 0.4s ease forwards; }
+.si-conv.wave-in { animation: waterfallIn 0.4s ease both; }
 .si-conv:not(.si-inserting):not(.stream-exit):not(.wave-in) { animation: aiFade 0.4s ease; }
 .si-conv.stream-exit { animation: streamExit 0.35s ease forwards; }
 
