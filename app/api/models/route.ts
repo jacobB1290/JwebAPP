@@ -9,6 +9,6 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     models: getAvailableModels(),
-    default: 'claude-sonnet-4.5',
+    default: 'claude-haiku-4.5',
   })
 }

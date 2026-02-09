@@ -91,6 +91,7 @@ export async function callLLM(
   userContent: string,
   messages?: { role: 'system' | 'user' | 'assistant'; content: string }[],
   useTools: boolean = true,
+  apiModel?: string,
 ): Promise<any> {
   const msgArray = messages || [
     { role: 'system' as const, content: systemPrompt },
@@ -98,7 +99,7 @@ export async function callLLM(
   ]
 
   const requestParams: any = {
-    model: 'gpt-5.2',
+    model: apiModel || 'gpt-5-mini',
     messages: msgArray,
     temperature: 0.7,
     max_completion_tokens: 2000,

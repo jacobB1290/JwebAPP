@@ -15,6 +15,9 @@ interface StreamItem {
   tool_call?: any
   animating?: boolean
   mergedFrom?: string  // entry title for merged content
+  waveDelay?: number   // ms delay for waterfall animation
+  exiting?: boolean    // exit animation flag
+  exitDelay?: number   // ms delay for staggered exit
 }
 
 interface ModelOption {
@@ -280,7 +283,7 @@ export default function Home() {
     recentEntryId: null, recentEntryTopic: null,
     continuationChecked: false, panelOpen: false,
     theme: 'light', error: null, entryTitle: null,
-    model: typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-sonnet-4.5') : 'claude-sonnet-4.5',
+    model: typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-haiku-4.5') : 'claude-haiku-4.5',
     models: [],
     modelPickerOpen: false,
   })
@@ -297,7 +300,8 @@ export default function Home() {
   const queueRef = useRef<Array<{ text: string; userRequested: boolean; insertIdx: number }>>([])
   const processingRef = useRef(false)
   const continuationCheckedRef = useRef(false)  // ref mirror to avoid stale closures
-  const modelRef = useRef(typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-sonnet-4.5') : 'claude-sonnet-4.5')
+  const modelRef = useRef(typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-haiku-4.5') : 'claude-haiku-4.5')
+  const exitingRef = useRef(false)  // tracks if stream is in exit animation
 
   const s = useCallback((update: Partial<AppState> | ((prev: AppState) => AppState)) => {
     if (typeof update === 'function') setState(update)
@@ -380,15 +384,43 @@ export default function Home() {
     setTimeout(() => inputRef.current?.focus(), 50)
   }, [state.greetingVisible, state.modelPickerOpen, s])
 
-  // ─── New entry ───
+  // ─── New entry — with exit animation ───
   const newEntry = () => {
-    s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null })
-    lastSentRef.current = ''
-    allTextRef.current = ''
-    queueRef.current = []
-    continuationCheckedRef.current = false
-    setInput('')
-    setTimeout(() => inputRef.current?.focus(), 100)
+    if (streamRef.current.length === 0) {
+      // Nothing to animate out — just reset
+      s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null })
+      lastSentRef.current = ''
+      allTextRef.current = ''
+      queueRef.current = []
+      continuationCheckedRef.current = false
+      setInput('')
+      setTimeout(() => inputRef.current?.focus(), 100)
+      return
+    }
+
+    // Trigger exit animation
+    exitingRef.current = true
+    s(prev => ({
+      ...prev,
+      stream: prev.stream.map((item, i) => ({
+        ...item,
+        exiting: true,
+        exitDelay: i * 30,  // stagger each item 30ms
+      })),
+    }))
+
+    // After animation completes, clear everything
+    const duration = Math.min(streamRef.current.length * 30, 400) + 500
+    setTimeout(() => {
+      exitingRef.current = false
+      s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null })
+      lastSentRef.current = ''
+      allTextRef.current = ''
+      queueRef.current = []
+      continuationCheckedRef.current = false
+      setInput('')
+      setTimeout(() => inputRef.current?.focus(), 100)
+    }, duration)
   }
 
   const onDeleteEntry = (id: string) => {
@@ -403,7 +435,7 @@ export default function Home() {
       const data = await res.json()
       if (!data.entry) return
 
-      const items: StreamItem[] = (data.messages || []).map((m: any) => ({
+      const items: StreamItem[] = (data.messages || []).map((m: any, idx: number) => ({
         id: m.id,
         type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
         content: m.content,
@@ -411,6 +443,7 @@ export default function Home() {
         linked_entry_id: m.linked_entry_id,
         tool_call: m.tool_call,
         animating: true,
+        waveDelay: idx * 60,  // waterfall: 60ms stagger between items
       }))
 
       // If we're merging (from AI tool call or link), insert into current stream
@@ -422,11 +455,15 @@ export default function Home() {
           content: data.entry.title || 'Past Entry',
           mergedFrom: data.entry.title,
           animating: true,
+          waveDelay: 0,
         }
+
+        // Offset wave delays for merged items
+        const mergedItems = items.map((item, i) => ({ ...item, waveDelay: (i + 1) * 60 }))
 
         s(prev => ({
           ...prev,
-          stream: [mergeHeader, ...items, ...prev.stream],
+          stream: [mergeHeader, ...mergedItems, ...prev.stream],
           panelOpen: false,
           error: null,
           greetingVisible: false,
@@ -439,6 +476,24 @@ export default function Home() {
         }, 100)
       } else {
         // Full load — replace stream (sidebar click or first load)
+        // If there's existing content, exit-animate it first
+        if (streamRef.current.length > 0) {
+          exitingRef.current = true
+          s(prev => ({
+            ...prev,
+            stream: prev.stream.map((item, i) => ({
+              ...item,
+              exiting: true,
+              exitDelay: i * 25,
+            })),
+          }))
+
+          // Wait for exit, then load new
+          const exitDuration = Math.min(streamRef.current.length * 25, 300) + 400
+          await new Promise(resolve => setTimeout(resolve, exitDuration))
+          exitingRef.current = false
+        }
+
         allTextRef.current = items.filter(i => i.type === 'writing').map(i => i.content).join('\n\n')
         lastSentRef.current = allTextRef.current
 
@@ -452,16 +507,23 @@ export default function Home() {
           entryTitle: data.entry.title || null,
           continuationChecked: true,
         })
-        setTimeout(() => { scrollToBottom(); inputRef.current?.focus() }, 100)
+
+        // Scroll to bottom AFTER waterfall animation completes
+        const totalWaveDuration = items.length * 60 + 400
+        setTimeout(() => {
+          streamEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+          inputRef.current?.focus()
+        }, totalWaveDuration)
       }
 
       // Remove animation flags after wave completes
+      const clearDelay = items.length * 60 + 600
       setTimeout(() => {
         s(prev => ({
           ...prev,
-          stream: prev.stream.map(item => ({ ...item, animating: false })),
+          stream: prev.stream.map(item => ({ ...item, animating: false, waveDelay: undefined })),
         }))
-      }, items.length * 40 + 600)
+      }, clearDelay)
     } catch {}
   }
 
@@ -772,33 +834,75 @@ export default function Home() {
         )}
 
         <div className="topbar-right">
-          {/* Model Picker */}
+          {/* Model Picker — grouped dropdown */}
           <div className="model-picker-wrap" onClick={e => e.stopPropagation()}>
             <button className="tbtn model-btn" onClick={() => s({ modelPickerOpen: !state.modelPickerOpen })} title="Change AI model">
-              <span className="model-badge">{state.model === 'claude-sonnet-4.5' ? 'Claude' : 'GPT'}</span>
+              <span className="model-badge">{(state.models.find(m => m.id === state.model) || { label: 'Haiku' }).label}</span>
             </button>
             {state.modelPickerOpen && (
               <div className="model-dropdown">
-                {state.models.length > 0 ? state.models.filter(m => m.available).map(m => (
-                  <button key={m.id} className={`model-opt ${state.model === m.id ? 'active' : ''}`} onClick={() => setModel(m.id)}>
-                    <span className="model-opt-label">{m.label}</span>
-                    <span className="model-opt-provider">{m.provider}</span>
-                    {state.model === m.id && <span className="model-check">&#10003;</span>}
-                  </button>
-                )) : (
-                  <>
-                    <button className={`model-opt ${state.model === 'claude-sonnet-4.5' ? 'active' : ''}`} onClick={() => setModel('claude-sonnet-4.5')}>
-                      <span className="model-opt-label">Claude Sonnet 4.5</span>
-                      <span className="model-opt-provider">anthropic</span>
-                      {state.model === 'claude-sonnet-4.5' && <span className="model-check">&#10003;</span>}
-                    </button>
-                    <button className={`model-opt ${state.model === 'gpt-5.2' ? 'active' : ''}`} onClick={() => setModel('gpt-5.2')}>
-                      <span className="model-opt-label">GPT-5.2</span>
-                      <span className="model-opt-provider">openai</span>
-                      {state.model === 'gpt-5.2' && <span className="model-check">&#10003;</span>}
-                    </button>
-                  </>
-                )}
+                {(() => {
+                  const available = state.models.length > 0 ? state.models.filter(m => m.available) : []
+                  const anthropicModels = available.filter(m => m.provider === 'anthropic')
+                  const openaiModels = available.filter(m => m.provider === 'openai')
+
+                  if (available.length === 0) {
+                    // Fallback when models haven't loaded
+                    return (
+                      <>
+                        <div className="model-group-label">Claude</div>
+                        <button className={`model-opt ${state.model === 'claude-haiku-4.5' ? 'active' : ''}`} onClick={() => setModel('claude-haiku-4.5')}>
+                          <span className="model-opt-label">Haiku 4.5</span>
+                          {state.model === 'claude-haiku-4.5' && <span className="model-check">&#10003;</span>}
+                        </button>
+                        <button className={`model-opt ${state.model === 'claude-sonnet-4.5' ? 'active' : ''}`} onClick={() => setModel('claude-sonnet-4.5')}>
+                          <span className="model-opt-label">Sonnet 4.5</span>
+                          {state.model === 'claude-sonnet-4.5' && <span className="model-check">&#10003;</span>}
+                        </button>
+                        <div className="model-group-divider" />
+                        <div className="model-group-label">GPT</div>
+                        <button className={`model-opt ${state.model === 'gpt-5-mini' ? 'active' : ''}`} onClick={() => setModel('gpt-5-mini')}>
+                          <span className="model-opt-label">GPT-5 Mini</span>
+                          {state.model === 'gpt-5-mini' && <span className="model-check">&#10003;</span>}
+                        </button>
+                        <button className={`model-opt ${state.model === 'gpt-5.2' ? 'active' : ''}`} onClick={() => setModel('gpt-5.2')}>
+                          <span className="model-opt-label">GPT-5.2</span>
+                          {state.model === 'gpt-5.2' && <span className="model-check">&#10003;</span>}
+                        </button>
+                      </>
+                    )
+                  }
+
+                  return (
+                    <>
+                      {anthropicModels.length > 0 && (
+                        <>
+                          <div className="model-group-label">Claude</div>
+                          {anthropicModels.map(m => (
+                            <button key={m.id} className={`model-opt ${state.model === m.id ? 'active' : ''}`} onClick={() => setModel(m.id)}>
+                              <span className="model-opt-label">{m.label}</span>
+                              {state.model === m.id && <span className="model-check">&#10003;</span>}
+                            </button>
+                          ))}
+                        </>
+                      )}
+                      {anthropicModels.length > 0 && openaiModels.length > 0 && (
+                        <div className="model-group-divider" />
+                      )}
+                      {openaiModels.length > 0 && (
+                        <>
+                          <div className="model-group-label">GPT</div>
+                          {openaiModels.map(m => (
+                            <button key={m.id} className={`model-opt ${state.model === m.id ? 'active' : ''}`} onClick={() => setModel(m.id)}>
+                              <span className="model-opt-label">{m.label}</span>
+                              {state.model === m.id && <span className="model-check">&#10003;</span>}
+                            </button>
+                          ))}
+                        </>
+                      )}
+                    </>
+                  )
+                })()}
               </div>
             )}
           </div>
@@ -823,12 +927,22 @@ export default function Home() {
       <div id="canvas">
         <div id="stream">
           {state.stream.map((item, i) => {
-            const waveDelay = item.animating ? { animationDelay: `${Math.min(i * 40, 600)}ms` } : {}
+            const waveStyle = item.animating && item.waveDelay != null
+              ? { animationDelay: `${item.waveDelay}ms` } as React.CSSProperties
+              : item.animating
+              ? { animationDelay: `${Math.min(i * 40, 600)}ms` } as React.CSSProperties
+              : {}
+
+            const exitStyle = item.exiting
+              ? { animationDelay: `${item.exitDelay || 0}ms` } as React.CSSProperties
+              : {}
+
+            const animClass = item.exiting ? 'stream-exit' : item.animating ? 'wave-in' : ''
 
             // Merged header — shows when a past entry was pulled into the thread
             if (item.type === 'merged-header') {
               return (
-                <div key={`merge-${i}`} className={`si-merge-header ${item.animating ? 'wave-in' : ''}`} style={waveDelay}>
+                <div key={`merge-${i}`} className={`si-merge-header ${animClass}`} style={item.exiting ? exitStyle : waveStyle}>
                   <div className="merge-line" />
                   <span className="merge-label">{item.content}</span>
                   <div className="merge-line" />
@@ -837,11 +951,11 @@ export default function Home() {
             }
 
             if (item.type === 'writing') {
-              return <div key={i} className={`si-writing ${item.animating ? 'wave-in' : ''}`} style={waveDelay}>{item.content}</div>
+              return <div key={i} className={`si-writing ${animClass}`} style={item.exiting ? exitStyle : waveStyle}>{item.content}</div>
             }
             if (item.type === 'ai-annotation') {
               return (
-                <div key={item.id || i} className={`si-annotation ${item.animating ? 'si-inserting' : ''}`} onClick={e => e.stopPropagation()} style={waveDelay}>
+                <div key={item.id || i} className={`si-annotation ${item.exiting ? 'stream-exit' : item.animating ? 'si-inserting' : ''}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
                   <div className="anno-bar" />
                   <div className="anno-body">
                     {item.content && <div className="anno-text">{item.content}</div>}
@@ -853,7 +967,7 @@ export default function Home() {
             }
             // ai-conversational
             return (
-              <div key={item.id || i} className={`si-conv ${item.animating ? 'si-inserting' : ''}`} onClick={e => e.stopPropagation()} style={waveDelay}>
+              <div key={item.id || i} className={`si-conv ${item.exiting ? 'stream-exit' : item.animating ? 'si-inserting' : ''}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
                 <div className="conv-text">{item.content}</div>
                 {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={(id) => loadEntry(id, true)} />}
               </div>
@@ -1019,17 +1133,18 @@ body {
 .login-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 
 /* ═══ Greeting ═══ */
-#greeting-screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 50; background: var(--bg); padding: 24px; transition: opacity 0.7s ease, transform 0.7s ease; cursor: text; }
-#greeting-screen.fading { opacity: 0; transform: translateY(-12px); pointer-events: none; }
+#greeting-screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 50; background: var(--bg); padding: 24px; transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), transform 0.8s cubic-bezier(0.16, 1, 0.3, 1); cursor: text; }
+#greeting-screen.fading { opacity: 0; transform: translateY(-16px) scale(0.98); pointer-events: none; }
 .greeting-text { font-size: 1.45rem; font-weight: 300; color: var(--text); text-align: center; max-width: 480px; line-height: 1.5; opacity: 0; animation: fadeUp 0.9s ease 0.3s forwards; }
-.greeting-continue { margin-top: 20px; font-family: 'DM Sans', sans-serif; font-size: 0.88rem; color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 8px 16px; border-radius: 10px; transition: color 0.2s, background 0.2s; opacity: 0; animation: fadeUp 0.7s ease 0.9s forwards; }
-.greeting-continue:hover { color: var(--accent); background: var(--hover-bg); }
+.greeting-continue { margin-top: 20px; font-family: 'DM Sans', sans-serif; font-size: 0.88rem; color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 8px 16px; border-radius: 10px; transition: color 0.2s, background 0.2s, transform 0.15s; opacity: 0; animation: fadeUp 0.7s ease 0.9s forwards; }
+.greeting-continue:hover { color: var(--accent); background: var(--hover-bg); transform: translateY(-1px); }
 .greeting-hint { margin-top: 48px; font-family: 'DM Sans', sans-serif; font-size: 0.72rem; color: var(--text-light); letter-spacing: 0.05em; opacity: 0; animation: fadeUp 0.6s ease 1.4s forwards; text-transform: uppercase; }
-@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ═══ Top Bar ═══ */
 #topbar { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; z-index: 100; padding-top: max(12px, env(safe-area-inset-top)); background: linear-gradient(to bottom, var(--bg) 60%, transparent); cursor: default; }
-.topbar-title { flex: 1; text-align: center; font-family: 'DM Sans', sans-serif; font-size: 0.7rem; color: var(--text-light); letter-spacing: 0.04em; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
+.topbar-title { flex: 1; text-align: center; font-family: 'DM Sans', sans-serif; font-size: 0.7rem; color: var(--text-light); letter-spacing: 0.04em; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; animation: titleFade 0.4s ease; }
+@keyframes titleFade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 .topbar-right { display: flex; gap: 2px; align-items: center; }
 .tbtn { background: none; border: none; cursor: pointer; color: var(--text-light); padding: 10px; border-radius: 10px; transition: all 0.25s; opacity: 0.4; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
 .tbtn:hover { opacity: 1; color: var(--text-muted); background: var(--hover-bg); }
@@ -1057,27 +1172,47 @@ body {
   margin-top: 4px;
   background: var(--panel-bg);
   border: 1px solid var(--divider);
-  border-radius: 12px;
-  padding: 4px;
-  min-width: 200px;
-  box-shadow: 0 8px 32px var(--shadow-md);
+  border-radius: 14px;
+  padding: 6px;
+  min-width: 180px;
+  box-shadow: 0 12px 40px var(--shadow-md), 0 2px 8px var(--shadow);
   z-index: 150;
-  animation: fadeUp 0.2s ease;
+  animation: dropdownIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transform-origin: top right;
+}
+@keyframes dropdownIn {
+  from { opacity: 0; transform: scale(0.95) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.model-group-label {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-light);
+  padding: 8px 10px 4px;
+}
+.model-group-divider {
+  height: 1px;
+  background: var(--divider);
+  margin: 4px 8px;
 }
 .model-opt {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 10px 12px;
+  padding: 9px 12px;
   border: none;
   background: none;
   cursor: pointer;
-  border-radius: 8px;
-  transition: background 0.15s;
+  border-radius: 10px;
+  transition: background 0.15s, transform 0.1s;
   text-align: left;
 }
 .model-opt:hover { background: var(--hover-bg); }
+.model-opt:active { transform: scale(0.98); }
 .model-opt.active { background: var(--accent-bg); }
 .model-opt-label { font-family: 'DM Sans', sans-serif; font-size: 0.82rem; color: var(--text); flex: 1; }
 .model-opt-provider { font-family: 'DM Sans', sans-serif; font-size: 0.62rem; color: var(--text-light); text-transform: uppercase; letter-spacing: 0.04em; }
@@ -1096,7 +1231,7 @@ body {
   border-radius: 20px;
   background: var(--bg-secondary);
   border: 1px solid var(--divider);
-  animation: thinkFade 0.4s ease;
+  animation: thinkFade 0.35s cubic-bezier(0.16, 1, 0.3, 1);
   z-index: 1;
 }
 .t-dot-sm {
@@ -1113,13 +1248,14 @@ body {
 
 /* ═══ Canvas ═══ */
 #canvas { max-width: 680px; width: 100%; margin: 0 auto; padding: 64px 24px 120px; min-height: 100dvh; }
-#stream { display: flex; flex-direction: column; gap: 0; }
+#stream { display: flex; flex-direction: column; gap: 0; transition: opacity 0.3s ease; }
 
 /* ═══ Stream Items — INLINE ═══ */
 
 /* User writing — looks like text on a page */
 .si-writing { padding: 0 0 4px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.15s ease; }
-.si-writing.wave-in { animation: waveIn 0.5s ease both; }
+.si-writing.wave-in { animation: waterfallIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.si-writing.stream-exit { animation: streamExit 0.45s cubic-bezier(0.55, 0, 1, 0.45) both; }
 
 /* Merged header — divider when a past entry is pulled into the thread */
 .si-merge-header {
@@ -1129,7 +1265,8 @@ body {
   margin: 20px 0 16px;
   cursor: default;
 }
-.si-merge-header.wave-in { animation: waveIn 0.5s ease both; }
+.si-merge-header.wave-in { animation: waterfallIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.si-merge-header.stream-exit { animation: streamExit 0.45s cubic-bezier(0.55, 0, 1, 0.45) both; }
 .merge-line { flex: 1; height: 1px; background: var(--divider); }
 .merge-label {
   font-family: 'DM Sans', sans-serif;
@@ -1143,7 +1280,8 @@ body {
 
 /* AI Annotation — margin note with accent bar, inline in the flow */
 .si-annotation { display: flex; gap: 0; margin: 8px 0 12px; cursor: default; }
-.si-annotation:not(.si-inserting) { animation: aiFade 0.4s ease; }
+.si-annotation:not(.si-inserting):not(.stream-exit) { animation: aiFade 0.4s ease; }
+.si-annotation.stream-exit { animation: streamExit 0.45s cubic-bezier(0.55, 0, 1, 0.45) both; }
 .anno-bar { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.5; flex-shrink: 0; }
 .anno-body { padding: 4px 0 4px 14px; font-size: 0.84rem; color: var(--text-muted); line-height: 1.6; }
 .anno-text { white-space: pre-wrap; word-break: break-word; }
@@ -1152,11 +1290,12 @@ body {
 
 /* AI Conversational — gentle inline note */
 .si-conv { margin: 10px 0 14px; padding: 14px 18px; background: var(--conv-bg); border-radius: 12px; cursor: default; font-size: 0.92rem; line-height: 1.65; }
-.si-conv:not(.si-inserting) { animation: aiFade 0.4s ease; }
+.si-conv:not(.si-inserting):not(.stream-exit) { animation: aiFade 0.4s ease; }
+.si-conv.stream-exit { animation: streamExit 0.45s cubic-bezier(0.55, 0, 1, 0.45) both; }
 
-/* ═══ Insertion Animation — text parts elegantly, AI slides in ═══ */
+/* ═══ Insertion Animation — AI slides in elegantly ═══ */
 .si-inserting {
-  animation: insertSlide 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: insertSlide 0.65s cubic-bezier(0.16, 1, 0.3, 1) both;
   transform-origin: top;
 }
 
@@ -1168,11 +1307,11 @@ body {
     margin-bottom: 0;
     padding-top: 0;
     padding-bottom: 0;
-    transform: translateY(-8px) scale(0.98);
+    transform: translateY(-10px) scale(0.97);
     overflow: hidden;
   }
-  40% {
-    opacity: 0.3;
+  50% {
+    opacity: 0.5;
     max-height: 500px;
     overflow: hidden;
   }
@@ -1183,21 +1322,35 @@ body {
   }
 }
 
-/* Wave-in animation for loading past entries */
-@keyframes waveIn {
+/* ═══ Waterfall-in — entry loads top-to-bottom with staggered fade ═══ */
+@keyframes waterfallIn {
   0% {
     opacity: 0;
-    transform: translateY(6px);
-    filter: blur(2px);
+    transform: translateY(12px);
+    filter: blur(3px);
   }
-  60% {
-    opacity: 0.7;
-    filter: blur(0);
+  40% {
+    opacity: 0.5;
+    filter: blur(1px);
   }
   100% {
     opacity: 1;
     transform: translateY(0);
     filter: blur(0);
+  }
+}
+
+/* ═══ Stream exit — content rises up and fades out ═══ */
+@keyframes streamExit {
+  0% {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-18px);
+    filter: blur(2px);
   }
 }
 
@@ -1238,7 +1391,8 @@ body {
 .send-hint-key { font-family: 'DM Sans', sans-serif; font-size: 0.6rem; color: var(--text-light); background: var(--bg-secondary); padding: 2px 7px; border-radius: 4px; }
 
 /* ═══ Error ═══ */
-.error-bar { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--error-bg); color: white; padding: 12px 18px; border-radius: 14px; font-family: 'DM Sans', sans-serif; font-size: 0.82rem; z-index: 60; display: flex; align-items: center; gap: 14px; box-shadow: 0 4px 24px rgba(0,0,0,0.2); animation: aiFade 0.3s ease; max-width: calc(100vw - 32px); cursor: default; }
+.error-bar { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--error-bg); color: white; padding: 12px 18px; border-radius: 14px; font-family: 'DM Sans', sans-serif; font-size: 0.82rem; z-index: 60; display: flex; align-items: center; gap: 14px; box-shadow: 0 4px 24px rgba(0,0,0,0.2); animation: errorSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); max-width: calc(100vw - 32px); cursor: default; }
+@keyframes errorSlideIn { from { opacity: 0; transform: translateX(-50%) translateY(16px) scale(0.95); } to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); } }
 .error-text { flex: 1; line-height: 1.4; }
 .error-close { background: none; border: none; color: white; cursor: pointer; opacity: 0.7; display: flex; align-items: center; justify-content: center; padding: 4px; }
 .error-close:hover { opacity: 1; }
@@ -1273,9 +1427,9 @@ body {
 .cal-title { color: var(--text-muted); }
 
 /* ═══ Panel ═══ */
-.panel-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.18); z-index: 200; opacity: 0; pointer-events: none; transition: opacity 0.35s; backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
+.panel-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.18); z-index: 200; opacity: 0; pointer-events: none; transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
 .panel-bg.open { opacity: 1; pointer-events: all; }
-.panel { position: fixed; top: 0; right: -420px; width: 380px; max-width: 90vw; height: 100dvh; background: var(--panel-bg); border-left: 1px solid var(--panel-border); z-index: 201; transition: right 0.4s cubic-bezier(0.16,1,0.3,1); overflow-y: auto; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; cursor: default; }
+.panel { position: fixed; top: 0; right: -420px; width: 380px; max-width: 90vw; height: 100dvh; background: var(--panel-bg); border-left: 1px solid var(--panel-border); z-index: 201; transition: right 0.45s cubic-bezier(0.16,1,0.3,1); overflow-y: auto; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; cursor: default; }
 .panel.open { right: 0; }
 .p-head { display: flex; justify-content: space-between; align-items: center; padding: 20px 20px 16px; padding-top: max(20px, env(safe-area-inset-top)); border-bottom: 1px solid var(--divider); flex-shrink: 0; }
 .p-title { font-family: 'DM Sans', sans-serif; font-size: 0.8rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
@@ -1286,8 +1440,8 @@ body {
 .p-empty { color: var(--text-light); font-size: 0.88rem; padding: 40px 0; text-align: center; line-height: 1.6; }
 .fgrp { margin-bottom: 20px; }
 .fname { font-family: 'DM Sans', sans-serif; font-size: 0.7rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-light); margin-bottom: 6px; padding-left: 4px; display: flex; align-items: center; gap: 6px; }
-.ecard { display: flex; align-items: center; border-radius: 12px; transition: background 0.15s; margin-bottom: 2px; }
-.ecard:hover { background: var(--hover-bg); }
+.ecard { display: flex; align-items: center; border-radius: 12px; transition: background 0.2s, transform 0.15s; margin-bottom: 2px; }
+.ecard:hover { background: var(--hover-bg); transform: translateX(2px); }
 .ecard-main { flex: 1; padding: 12px 8px 12px 14px; cursor: pointer; min-width: 0; }
 .ecard-t { font-size: 0.92rem; color: var(--text); margin-bottom: 3px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ecard-meta { font-family: 'DM Sans', sans-serif; font-size: 0.68rem; color: var(--text-light); display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
@@ -1329,9 +1483,9 @@ body {
 ::selection { background: var(--accent-light); color: var(--text); }
 
 @media (hover: none) and (pointer: coarse) {
-  .tbtn:hover, .ecard:hover, .p-close:hover, .login-btn:hover, .greeting-continue:hover { background: initial; opacity: initial; color: initial; transform: initial; }
+  .tbtn:hover, .ecard:hover, .p-close:hover, .login-btn:hover, .greeting-continue:hover { background: initial; opacity: initial; color: initial; transform: none; }
   .tbtn:active { opacity: 1; background: var(--hover-bg); }
-  .ecard:active { background: var(--hover-bg); }
+  .ecard:active { background: var(--hover-bg); transform: translateX(2px); }
   #send-hint:hover { opacity: 0.4; background: var(--hover-bg); border-color: var(--divider); }
   #send-hint:active { opacity: 1; background: var(--accent-bg); border-color: var(--accent-light); }
   .ecard-del { opacity: 0.5; }

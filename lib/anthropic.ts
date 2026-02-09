@@ -97,6 +97,7 @@ export async function callLLM(
   userContent: string,
   messages?: { role: 'system' | 'user' | 'assistant'; content: string }[],
   useTools: boolean = true,
+  apiModel?: string,
 ): Promise<any> {
   // Anthropic uses system as a separate top-level param, not a message
   let system = systemPrompt
@@ -141,7 +142,7 @@ export async function callLLM(
   }
 
   const requestParams: Anthropic.MessageCreateParams = {
-    model: 'claude-sonnet-4-5-20250929',
+    model: apiModel || 'claude-haiku-4-5-20251001',
     system,
     messages: sanitized,
     max_tokens: 2000,

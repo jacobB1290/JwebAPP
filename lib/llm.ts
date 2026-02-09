@@ -11,7 +11,7 @@ import * as anthropicProvider from './anthropic'
 export { SYSTEM_PROMPT, GREETING_PROMPT, CONTINUATION_PROMPT } from './prompts'
 
 // ─── Model registry ───
-export type ModelId = 'claude-sonnet-4.5' | 'gpt-5.2'
+export type ModelId = 'claude-haiku-4.5' | 'claude-sonnet-4.5' | 'gpt-5-mini' | 'gpt-5.2'
 
 export interface ModelInfo {
   id: ModelId
@@ -21,11 +21,23 @@ export interface ModelInfo {
 }
 
 export const MODELS: Record<ModelId, ModelInfo> = {
-  'claude-sonnet-4.5': {
-    id: 'claude-sonnet-4.5',
-    label: 'Claude Sonnet 4.5',
+  'claude-haiku-4.5': {
+    id: 'claude-haiku-4.5',
+    label: 'Haiku 4.5',
     provider: 'anthropic',
     envKey: 'ANTHROPIC_API_KEY',
+  },
+  'claude-sonnet-4.5': {
+    id: 'claude-sonnet-4.5',
+    label: 'Sonnet 4.5',
+    provider: 'anthropic',
+    envKey: 'ANTHROPIC_API_KEY',
+  },
+  'gpt-5-mini': {
+    id: 'gpt-5-mini',
+    label: 'GPT-5 Mini',
+    provider: 'openai',
+    envKey: 'OPENAI_API_KEY',
   },
   'gpt-5.2': {
     id: 'gpt-5.2',
@@ -35,7 +47,7 @@ export const MODELS: Record<ModelId, ModelInfo> = {
   },
 }
 
-export const DEFAULT_MODEL: ModelId = 'claude-sonnet-4.5'
+export const DEFAULT_MODEL: ModelId = 'claude-haiku-4.5'
 
 // ─── Resolve a model string to a valid ModelId ───
 function resolveModel(model?: string): ModelId {
@@ -54,10 +66,13 @@ export async function callLLM(
   const modelId = resolveModel(model)
   const info = MODELS[modelId]
 
+  // Resolve the actual API model string
+  const apiModel = getApiModelId(modelId)
+
   if (info.provider === 'anthropic') {
-    return anthropicProvider.callLLM(systemPrompt, userContent, messages, useTools)
+    return anthropicProvider.callLLM(systemPrompt, userContent, messages, useTools, apiModel)
   } else {
-    return openaiProvider.callLLM(systemPrompt, userContent, messages, useTools)
+    return openaiProvider.callLLM(systemPrompt, userContent, messages, useTools, apiModel)
   }
 }
 
@@ -68,6 +83,17 @@ export async function callLLMSimple(
   model?: string,
 ): Promise<any> {
   return callLLM(systemPrompt, userContent, undefined, false, model)
+}
+
+// ─── Map our model IDs to actual API model strings ───
+function getApiModelId(modelId: ModelId): string {
+  const map: Record<ModelId, string> = {
+    'claude-haiku-4.5': 'claude-haiku-4-5-20251001',
+    'claude-sonnet-4.5': 'claude-sonnet-4-5-20250929',
+    'gpt-5-mini': 'gpt-5-mini',
+    'gpt-5.2': 'gpt-5.2',
+  }
+  return map[modelId] || modelId
 }
 
 // ─── API endpoint: list available models ───
