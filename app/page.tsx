@@ -425,12 +425,16 @@ export default function Home() {
     // Commit the text as a writing block immediately
     const writingItem: StreamItem = { type: 'writing', content: text }
 
-    s(prev => {
-      const newStream = [...prev.stream, writingItem]
-      const insertIdx = newStream.length - 1  // index of writing item we just added
-      queueRef.current.push({ text, userRequested, insertIdx })
-      return { ...prev, stream: newStream, error: null }
-    })
+    // Push to queue SYNCHRONOUSLY before setState — 
+    // setState callback is batched and may not run before processQueue reads the queue
+    const insertIdx = streamRef.current.length  // current stream length = index of new writing item
+    queueRef.current.push({ text, userRequested, insertIdx })
+
+    s(prev => ({
+      ...prev,
+      stream: [...prev.stream, writingItem],
+      error: null,
+    }))
 
     allTextRef.current = (allTextRef.current ? allTextRef.current + '\n\n' : '') + text
     setInput('')
