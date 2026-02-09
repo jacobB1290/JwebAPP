@@ -55,7 +55,13 @@ timestamp: ${new Date().toISOString()}`
     // Call LLM — no fallback
     const llmResponse = await callLLM(SYSTEM_PROMPT, llmInput)
 
-    const responses = llmResponse.responses || []
+    let responses = llmResponse.responses || []
+
+    // If the model called load_entry but returned no text, add a brief acknowledgment
+    if (llmResponse.tool_call?.type === 'load_entry' && responses.length === 0) {
+      responses = [{ content: 'Pulling that up.', type: 'conversational', tone: 'warm' }]
+    }
+
     // CRITICAL: If entryId was provided, FORCE append — don't let LLM accidentally create a new entry
     let dbAction = llmResponse.database_action || { type: 'create_new_entry' }
     if (entryId && dbAction.type === 'create_new_entry') {

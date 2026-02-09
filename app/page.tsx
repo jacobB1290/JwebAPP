@@ -13,6 +13,7 @@ interface StreamItem {
   tone?: string
   linked_entry_id?: string | null
   tool_call?: any
+  animating?: boolean  // true when freshly inserted — triggers CSS animation
 }
 
 interface AppState {
@@ -298,7 +299,7 @@ export default function Home() {
     if (state.entryId === id) newEntry()
   }
 
-  // ─── Load existing entry — rebuild as interleaved stream ───
+  // ─── Load existing entry — rebuild as interleaved stream with wave animation ───
   const loadEntry = async (entryId: string) => {
     try {
       const res = await fetch(`/api/entries/${entryId}`)
@@ -306,14 +307,15 @@ export default function Home() {
       const data = await res.json()
       if (!data.entry) return
 
-      // Convert messages to stream items IN ORDER (preserving the interleaving)
-      const items: StreamItem[] = (data.messages || []).map((m: any) => ({
+      // Convert messages to stream items — mark all as animating for wave effect
+      const items: StreamItem[] = (data.messages || []).map((m: any, idx: number) => ({
         id: m.id,
         type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
         content: m.content,
         tone: m.tone,
         linked_entry_id: m.linked_entry_id,
         tool_call: m.tool_call,
+        animating: true, // triggers wave-in animation
       }))
 
       // Rebuild allTextRef from user messages
@@ -328,8 +330,17 @@ export default function Home() {
         error: null,
         greetingVisible: false,
         entryTitle: data.entry.title || null,
-        continuationChecked: true, // Don't re-check continuation for loaded entries
+        continuationChecked: true,
       })
+
+      // Remove animation flags after animation completes
+      setTimeout(() => {
+        s(prev => ({
+          ...prev,
+          stream: prev.stream.map(item => ({ ...item, animating: false })),
+        }))
+      }, items.length * 40 + 600)
+
       setTimeout(() => {
         scrollToBottom()
         inputRef.current?.focus()
@@ -365,19 +376,24 @@ export default function Home() {
 
     // Commit the current input as a writing block in the stream
     const writingItem: StreamItem = { type: 'writing', content: text }
-    const newStream = [...state.stream, writingItem]
+
+    // Capture the insertion point — AI response will go after this index
+    const insertAfterIndex = state.stream.length // index of the new writing item
 
     // Update tracking
     allTextRef.current = (allTextRef.current ? allTextRef.current + '\n\n' : '') + text
-    const delta = text // The input IS the delta since it was last cleared
+    const delta = text
 
+    // Clear input but DON'T disable it — user keeps writing
     setInput('')
-    s({ busy: true, error: null, stream: newStream })
+    busyRef.current = true
+    s(prev => ({ ...prev, busy: true, error: null, stream: [...prev.stream, writingItem] }))
     scrollToBottom()
 
     try {
-      // Build session context from recent stream
-      const recentContext = newStream.slice(-15).map(i => ({
+      // Build session context from recent stream (use latest state)
+      const currentStream = [...state.stream, writingItem]
+      const recentContext = currentStream.slice(-15).map(i => ({
         sender: i.type === 'writing' ? 'user' : 'ai',
         content: i.content,
         type: i.type === 'writing' ? 'user_message' : i.type === 'ai-annotation' ? 'annotation' : 'conversational',
@@ -402,29 +418,39 @@ export default function Home() {
 
       const data = await res.json()
 
-      // Build AI stream items — these go INLINE right after the writing block
+      // Build AI stream items with animation flag
       const aiItems: StreamItem[] = (data.responses || []).filter((r: any) => r.content?.trim()).map((r: any) => ({
         id: r.id,
         type: r.type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
         content: r.content,
         tone: r.tone,
         linked_entry_id: r.linked_entry_id,
+        animating: true, // flag for CSS insertion animation
       }))
 
       // Attach tool call to LAST AI item only
       if (data.toolCall && aiItems.length > 0) {
         aiItems[aiItems.length - 1].tool_call = data.toolCall
       } else if (data.toolCall && aiItems.length === 0) {
-        aiItems.push({ type: 'ai-annotation', content: '', tool_call: data.toolCall })
+        aiItems.push({ type: 'ai-annotation', content: '', tool_call: data.toolCall, animating: true })
       }
 
-      s(prev => ({
-        ...prev,
-        entryId: data.entryId,
-        entryTitle: data.entryTitle || prev.entryTitle,
-        stream: [...prev.stream, ...aiItems],
-        busy: false,
-      }))
+      // Insert AI items right after the writing block that triggered them
+      // The user may have added MORE writing blocks while we were waiting
+      // So we insert after insertAfterIndex (the writing block's position)
+      s(prev => {
+        const newStream = [...prev.stream]
+        const insertAt = Math.min(insertAfterIndex + 1, newStream.length)
+        newStream.splice(insertAt, 0, ...aiItems)
+        return {
+          ...prev,
+          entryId: data.entryId,
+          entryTitle: data.entryTitle || prev.entryTitle,
+          stream: newStream,
+          busy: false,
+        }
+      })
+      busyRef.current = false
 
       lastSentRef.current = allTextRef.current
       if (aiItems.length > 0) scrollToBottom()
@@ -434,6 +460,7 @@ export default function Home() {
         setTimeout(() => loadEntry(data.toolCall.data.entry_id), 300)
       }
     } catch {
+      busyRef.current = false
       s({ busy: false, error: 'Network error — check your connection' })
     }
   }
@@ -526,12 +553,15 @@ export default function Home() {
       <div id="canvas">
         <div id="stream">
           {state.stream.map((item, i) => {
+            const waveDelay = item.animating ? {} : (state.stream.length > 5 && i < state.stream.length - 3)
+              ? { animationDelay: `${Math.min(i * 40, 600)}ms` } : {}
+
             if (item.type === 'writing') {
-              return <div key={i} className="si-writing">{item.content}</div>
+              return <div key={i} className={`si-writing ${item.animating ? 'wave-in' : ''}`} style={waveDelay}>{item.content}</div>
             }
             if (item.type === 'ai-annotation') {
               return (
-                <div key={item.id || i} className="si-annotation" onClick={e => e.stopPropagation()}>
+                <div key={item.id || i} className={`si-annotation ${item.animating ? 'si-inserting' : ''}`} onClick={e => e.stopPropagation()} style={waveDelay}>
                   <div className="anno-bar" />
                   <div className="anno-body">
                     {item.content && <div className="anno-text">{item.content}</div>}
@@ -543,7 +573,7 @@ export default function Home() {
             }
             // ai-conversational
             return (
-              <div key={item.id || i} className="si-conv" onClick={e => e.stopPropagation()}>
+              <div key={item.id || i} className={`si-conv ${item.animating ? 'si-inserting' : ''}`} onClick={e => e.stopPropagation()} style={waveDelay}>
                 <div className="conv-text">{item.content}</div>
                 {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={loadEntry} />}
               </div>
@@ -567,7 +597,7 @@ export default function Home() {
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); manualSend() }
               if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); manualSend() }
             }}
-            disabled={state.busy}
+            disabled={false}
             autoFocus
           />
         </div>
@@ -674,17 +704,68 @@ body {
 
 /* User writing — looks like text on a page */
 .si-writing { padding: 0 0 4px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.15s ease; }
+.si-writing.wave-in { animation: waveIn 0.5s ease both; }
 
 /* AI Annotation — margin note with accent bar, inline in the flow */
-.si-annotation { display: flex; gap: 0; margin: 8px 0 12px; animation: aiFade 0.4s ease; cursor: default; }
+.si-annotation { display: flex; gap: 0; margin: 8px 0 12px; cursor: default; }
+.si-annotation:not(.si-inserting) { animation: aiFade 0.4s ease; }
 .anno-bar { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.5; flex-shrink: 0; }
 .anno-body { padding: 4px 0 4px 14px; font-size: 0.84rem; color: var(--text-muted); line-height: 1.6; }
 .anno-text { white-space: pre-wrap; word-break: break-word; }
 .anno-link { font-family: 'DM Sans', sans-serif; font-size: 0.68rem; color: var(--accent); cursor: pointer; margin-top: 4px; display: inline-block; text-decoration: underline; text-underline-offset: 2px; opacity: 0.8; }
 .anno-link:hover { opacity: 1; }
 
-/* AI Conversational — gentle inline note, NOT a separate section */
-.si-conv { margin: 10px 0 14px; padding: 14px 18px; background: var(--conv-bg); border-radius: 12px; animation: aiFade 0.4s ease; cursor: default; font-size: 0.92rem; line-height: 1.65; }
+/* AI Conversational — gentle inline note */
+.si-conv { margin: 10px 0 14px; padding: 14px 18px; background: var(--conv-bg); border-radius: 12px; cursor: default; font-size: 0.92rem; line-height: 1.65; }
+.si-conv:not(.si-inserting) { animation: aiFade 0.4s ease; }
+
+/* ═══ Insertion Animation — text parts elegantly, AI slides in ═══ */
+.si-inserting {
+  animation: insertSlide 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+  transform-origin: top;
+}
+
+@keyframes insertSlide {
+  0% {
+    opacity: 0;
+    max-height: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    transform: translateY(-8px) scale(0.98);
+    overflow: hidden;
+  }
+  40% {
+    opacity: 0.3;
+    max-height: 500px;
+    overflow: hidden;
+  }
+  100% {
+    opacity: 1;
+    max-height: 2000px;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Wave-in animation for loading past entries */
+@keyframes waveIn {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+    filter: blur(2px);
+  }
+  60% {
+    opacity: 0.7;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
 .conv-text { white-space: pre-wrap; word-break: break-word; }
 
 /* ═══ Writing Input ═══ */
@@ -697,7 +778,6 @@ body {
   caret-color: var(--accent);
 }
 #tinput::placeholder { color: var(--text-light); opacity: 0.35; font-style: italic; }
-#tinput:disabled { opacity: 0.6; }
 
 /* ═══ Thinking ═══ */
 .thinking, .thinking-inline { display: flex; gap: 5px; padding: 8px 2px; }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
-import { callLLM, GREETING_PROMPT } from '@/lib/openai'
+import { callLLMSimple, GREETING_PROMPT } from '@/lib/openai'
 import { validateAuth, authError } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
@@ -55,7 +55,7 @@ Recent entries: ${JSON.stringify((recentEntries || []).slice(0, 5).map(e => ({
   id: e.id,
 })))}`
 
-      const result = await callLLM(GREETING_PROMPT, greetingContext)
+      const result = await callLLMSimple(GREETING_PROMPT, greetingContext)
       greeting = result.greeting || ''
       recentEntryId = result.recent_entry_id || null
       recentEntryTopic = result.recent_entry_topic || null

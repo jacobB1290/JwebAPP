@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
-import { callLLM, CONTINUATION_PROMPT } from '@/lib/openai'
+import { callLLMSimple, CONTINUATION_PROMPT } from '@/lib/openai'
 import { validateAuth, authError } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
@@ -52,7 +52,7 @@ User's new text: "${text}"
 
 Is this a continuation of one of the recent entries, or something new?`
 
-    const result = await callLLM(CONTINUATION_PROMPT, checkInput)
+    const result = await callLLMSimple(CONTINUATION_PROMPT, checkInput)
 
     if (result.is_continuation && result.confidence > 0.6 && result.continuation_entry_id) {
       const { data: msgs } = await supabase

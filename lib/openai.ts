@@ -6,32 +6,156 @@ const openai = new OpenAI({
   baseURL: 'https://api.openai.com/v1',
 })
 
+// ═══════════════════════════════════════
+// FUNCTION CALLING TOOLS (OpenAI standard)
+// ═══════════════════════════════════════
+
+const NOTEBOOK_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'load_entry',
+      description: 'Load a past journal entry into view. Use when the user references a previous entry, says "continue that", "go back to", or wants to revisit something they wrote before. The frontend will display the entry as if the user clicked it from the sidebar.',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          entry_id: { type: 'string', description: 'The UUID of the entry to load' },
+          title: { type: 'string', description: 'The title of the entry being loaded' },
+        },
+        required: ['entry_id', 'title'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_chart',
+      description: 'Create a visual chart to display data patterns, trends, or comparisons from the user\'s entries. Use sparingly — only when data visualization genuinely adds value.',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Chart title' },
+          chart_type: { type: 'string', enum: ['line', 'bar', 'pie'], description: 'Type of chart' },
+          labels: { type: 'array', items: { type: 'string' }, description: 'X-axis labels' },
+          datasets: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, data: { type: 'array', items: { type: 'number' } } }, required: ['label', 'data'], additionalProperties: false }, description: 'Data series' },
+        },
+        required: ['title', 'chart_type', 'labels', 'datasets'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_checklist',
+      description: 'Create an interactive checklist for the user. Use when the user is planning, making a to-do list, or working through steps.',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Checklist title' },
+          items: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, checked: { type: 'boolean' } }, required: ['text', 'checked'], additionalProperties: false }, description: 'Checklist items' },
+        },
+        required: ['title', 'items'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_prompt_card',
+      description: 'Create a reflective journaling prompt. Use when you want to offer the user a question to think about — but only when it would genuinely deepen their reflection.',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: 'The reflective question or journaling prompt' },
+        },
+        required: ['prompt'],
+        additionalProperties: false,
+      },
+    },
+  },
+]
+
+// ═══════════════════════════════════════
+// MAIN LLM CALL — with function calling
+// ═══════════════════════════════════════
+
 export async function callLLM(
   systemPrompt: string,
   userContent: string,
   messages?: { role: 'system' | 'user' | 'assistant'; content: string }[],
+  useTools: boolean = true,
 ): Promise<any> {
-  // Support both simple (system+user) and multi-turn message arrays
   const msgArray = messages || [
     { role: 'system' as const, content: systemPrompt },
     { role: 'user' as const, content: userContent },
   ]
 
-  const response = await openai.chat.completions.create({
+  const requestParams: any = {
     model: 'gpt-5.2',
     messages: msgArray,
     temperature: 0.7,
     max_completion_tokens: 2000,
     response_format: { type: 'json_object' },
-  })
-
-  const content = response.choices[0]?.message?.content || '{}'
-  try {
-    return JSON.parse(content)
-  } catch {
-    // If JSON parsing fails, wrap the content
-    return { responses: [{ content, type: 'conversational', tone: 'neutral' }] }
   }
+
+  // Add tools for the main notebook prompt (not greeting/continuation)
+  if (useTools) {
+    requestParams.tools = NOTEBOOK_TOOLS
+    requestParams.tool_choice = 'auto'
+    requestParams.parallel_tool_calls = false
+  }
+
+  const response = await openai.chat.completions.create(requestParams)
+
+  const choice = response.choices[0]
+  const content = choice?.message?.content || '{}'
+  const toolCalls = choice?.message?.tool_calls || []
+
+  // Parse the main JSON response
+  let parsed: any
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    parsed = content.trim()
+      ? { responses: [{ content, type: 'conversational', tone: 'neutral' }] }
+      : {}
+  }
+
+  // Convert OpenAI tool_calls into our format
+  if (toolCalls.length > 0) {
+    const tc = toolCalls[0] as any // We only use one tool per turn
+    try {
+      const fnName = tc.function?.name || tc.name || ''
+      const fnArgs = tc.function?.arguments || tc.arguments || '{}'
+      const args = JSON.parse(fnArgs)
+      if (fnName === 'load_entry') {
+        parsed.tool_call = { type: 'load_entry', data: args }
+      } else if (fnName === 'create_chart') {
+        parsed.tool_call = { type: 'chart', title: args.title, data: { chartType: args.chart_type, labels: args.labels, datasets: args.datasets } }
+      } else if (fnName === 'create_checklist') {
+        parsed.tool_call = { type: 'checklist', title: args.title, data: { items: args.items } }
+      } else if (fnName === 'create_prompt_card') {
+        parsed.tool_call = { type: 'prompt_card', title: 'Reflect', data: { prompt: args.prompt } }
+      }
+    } catch {}
+  }
+
+  return parsed
+}
+
+// Simple LLM call without tools (for greeting, continuation)
+export async function callLLMSimple(
+  systemPrompt: string,
+  userContent: string,
+): Promise<any> {
+  return callLLM(systemPrompt, userContent, undefined, false)
 }
 
 // ─── System Prompt ───
@@ -105,16 +229,16 @@ On manual triggers (user_requested_response = true):
 - ALWAYS respond with at least one conversational response. The user pressed the button — they want you.
 
 ═══════════════════════════════════════
-RECALLING PAST ENTRIES — THIS IS CRITICAL
+RECALLING PAST ENTRIES — USE THE load_entry TOOL
 ═══════════════════════════════════════
 
 When the user references a past conversation, says "continue that", "go back to what I was writing about", "that thing from earlier", or anything that clearly refers to a previous entry:
 
-1. You MUST use the link_card tool_call with the matching entry_id from RECENT ENTRIES.
-2. Set tool_call to: {"type":"load_entry","data":{"entry_id":"<the-uuid>","title":"<entry-title>"}}
-3. The frontend will automatically load that entry into view — the user will see it as if they clicked it from the sidebar.
-4. Your conversational response should acknowledge you're pulling it up: "Pulling that up." or "Here's where you left off." — keep it brief.
-5. If you can't find a matching entry, say so honestly: "I'm not sure which one you mean — can you give me a bit more?"
+1. You MUST call the load_entry function tool with the matching entry_id from RECENT ENTRIES.
+2. The frontend will automatically load that entry into view — the user will see it as if they clicked it from the sidebar.
+3. Your conversational response should acknowledge you're pulling it up: "Pulling that up." or "Here's where you left off." — keep it brief.
+4. If you can't find a matching entry, say so honestly: "I'm not sure which one you mean — can you give me a bit more?"
+5. You have function tools available: load_entry, create_chart, create_checklist, create_prompt_card. Call them directly when needed — the model handles this natively.
 
 ═══════════════════════════════════════
 DATABASE MANAGEMENT
@@ -144,7 +268,6 @@ You MUST respond with ONLY a valid JSON object:
   "emotion_tags": ["detected emotions"],
   "topic_tags": ["detected topics"],
   "folder_suggestion": "Folder name",
-  "tool_call": null,
   "entry_title_suggestion": "Evocative title",
   "context_memo_update": "Updated rolling summary (300-500 tokens)",
   "continuation_detected": false,
@@ -160,17 +283,7 @@ RULES:
 - responses CAN be empty [] on auto triggers (silence).
 - You can have multiple items but keep it restrained — usually just 1. At most 1 conversational + 1 annotation per turn.
 - ALWAYS include emotion_tags, topic_tags, folder_suggestion, entry_title_suggestion, context_memo_update — even when responses is empty.
-- tool_call is usually null. Use it sparingly and only when genuinely useful.
-
-tool_call types (use sparingly):
-- load_entry: {"type":"load_entry","data":{"entry_id":"uuid","title":"Entry title"}} — USE THIS when user wants to recall/continue a past entry
-- chart: {"type":"chart","title":"...","data":{"chartType":"line|bar|pie","labels":[...],"datasets":[{"label":"...","data":[...]}]}}
-- table: {"type":"table","title":"...","data":{"headers":[...],"rows":[[...]]}}
-- checklist: {"type":"checklist","title":"...","data":{"items":[{"text":"...","checked":false}]}}
-- prompt_card: {"type":"prompt_card","title":"...","data":{"prompt":"A reflective question"}}
-- tracker: {"type":"tracker","title":"...","data":{"metric":"...","unit":"...","values":[{"date":"...","value":0}]}}
-- link_card: {"type":"link_card","title":"...","data":{"title":"Entry title","date":"...","entry_id":"uuid"}}
-- calendar_view: {"type":"calendar_view","title":"...","data":{"events":[{"date":"...","title":"..."}]}}`
+- For tools (charts, checklists, prompts, loading entries), use the function tools provided — do NOT put tool_call in the JSON response. The model calls functions natively.`
 
 export const GREETING_PROMPT = `You are the AI inside a personal Smart Notebook. Generate a greeting based on the context provided.
 
