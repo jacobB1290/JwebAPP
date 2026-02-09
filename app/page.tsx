@@ -18,6 +18,7 @@ interface StreamItem {
   waveDelay?: number   // ms delay for waterfall animation
   exiting?: boolean    // exit animation flag
   exitDelay?: number   // ms delay for staggered exit
+  isNew?: boolean      // true = live AI insertion, false/undefined = loaded from past
 }
 
 interface ModelOption {
@@ -459,7 +460,7 @@ export default function Home() {
         linked_entry_id: m.linked_entry_id,
         tool_call: m.tool_call,
         animating: true,
-        waveDelay: idx * 60,  // waterfall: 60ms stagger between items
+        waveDelay: idx * 80,  // waterfall: 80ms stagger between items
       }))
 
       // If we're merging (from AI tool call or link), insert into current stream
@@ -475,7 +476,7 @@ export default function Home() {
         }
 
         // Offset wave delays for merged items
-        const mergedItems = items.map((item, i) => ({ ...item, waveDelay: (i + 1) * 60 }))
+        const mergedItems = items.map((item, i) => ({ ...item, waveDelay: (i + 1) * 80 }))
 
         s(prev => ({
           ...prev,
@@ -525,7 +526,7 @@ export default function Home() {
         })
 
         // Scroll to bottom AFTER waterfall animation completes
-        const totalWaveDuration = items.length * 60 + 400
+        const totalWaveDuration = items.length * 80 + 500
         setTimeout(() => {
           streamEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
           inputRef.current?.focus()
@@ -660,12 +661,13 @@ export default function Home() {
         tone: r.tone,
         linked_entry_id: r.linked_entry_id,
         animating: true,
+        isNew: true,
       }))
 
       if (data.toolCall && aiItems.length > 0) {
         aiItems[aiItems.length - 1].tool_call = data.toolCall
       } else if (data.toolCall && aiItems.length === 0) {
-        aiItems.push({ type: 'ai-annotation', content: '', tool_call: data.toolCall, animating: true })
+        aiItems.push({ type: 'ai-annotation', content: '', tool_call: data.toolCall, animating: true, isNew: true })
       }
 
       // Only insert if there are items to insert
@@ -958,8 +960,11 @@ export default function Home() {
               return <div key={i} className={`si-writing ${animClass}`} style={item.exiting ? exitStyle : waveStyle}>{item.content}</div>
             }
             if (item.type === 'ai-annotation') {
+              // isNew = live AI response → use si-inserting (slide in)
+              // !isNew = loaded from past entry → use wave-in (simple fade)
+              const aiAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'si-inserting' : 'wave-in') : ''
               return (
-                <div key={item.id || i} className={`si-annotation ${item.exiting ? 'stream-exit' : item.animating ? 'si-inserting' : ''}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
+                <div key={item.id || i} className={`si-annotation ${aiAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
                   <div className="anno-bar" />
                   <div className="anno-body">
                     {item.content && <div className="anno-text">{item.content}</div>}
@@ -970,8 +975,9 @@ export default function Home() {
               )
             }
             // ai-conversational
+            const convAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'si-inserting' : 'wave-in') : ''
             return (
-              <div key={item.id || i} className={`si-conv ${item.exiting ? 'stream-exit' : item.animating ? 'si-inserting' : ''}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
+              <div key={item.id || i} className={`si-conv ${convAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
                 <div className="conv-text">{item.content}</div>
                 {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={(id) => loadEntry(id, true)} />}
               </div>
@@ -1258,8 +1264,8 @@ body {
 
 /* User writing — looks like text on a page */
 .si-writing { padding: 0 0 4px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.15s ease; }
-.si-writing.wave-in { animation: waterfallIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-.si-writing.stream-exit { animation: streamExit 0.4s cubic-bezier(0.4, 0, 1, 1) forwards; }
+.si-writing.wave-in { animation: waterfallIn 0.4s ease forwards; }
+.si-writing.stream-exit { animation: streamExit 0.35s ease forwards; }
 
 /* Merged header — divider when a past entry is pulled into the thread */
 .si-merge-header {
@@ -1269,8 +1275,8 @@ body {
   margin: 20px 0 16px;
   cursor: default;
 }
-.si-merge-header.wave-in { animation: waterfallIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-.si-merge-header.stream-exit { animation: streamExit 0.4s cubic-bezier(0.4, 0, 1, 1) forwards; }
+.si-merge-header.wave-in { animation: waterfallIn 0.4s ease forwards; }
+.si-merge-header.stream-exit { animation: streamExit 0.35s ease forwards; }
 .merge-line { flex: 1; height: 1px; background: var(--divider); }
 .merge-label {
   font-family: 'DM Sans', sans-serif;
@@ -1284,8 +1290,9 @@ body {
 
 /* AI Annotation — margin note with accent bar, inline in the flow */
 .si-annotation { display: flex; gap: 0; margin: 8px 0 12px; cursor: default; }
-.si-annotation:not(.si-inserting):not(.stream-exit) { animation: aiFade 0.4s ease; }
-.si-annotation.stream-exit { animation: streamExit 0.4s cubic-bezier(0.4, 0, 1, 1) forwards; }
+.si-annotation.wave-in { animation: waterfallIn 0.4s ease forwards; }
+.si-annotation:not(.si-inserting):not(.stream-exit):not(.wave-in) { animation: aiFade 0.4s ease; }
+.si-annotation.stream-exit { animation: streamExit 0.35s ease forwards; }
 .anno-bar { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.5; flex-shrink: 0; }
 .anno-body { padding: 4px 0 4px 14px; font-size: 0.84rem; color: var(--text-muted); line-height: 1.6; }
 .anno-text { white-space: pre-wrap; word-break: break-word; }
@@ -1294,8 +1301,9 @@ body {
 
 /* AI Conversational — gentle inline note */
 .si-conv { margin: 10px 0 14px; padding: 14px 18px; background: var(--conv-bg); border-radius: 12px; cursor: default; font-size: 0.92rem; line-height: 1.65; }
-.si-conv:not(.si-inserting):not(.stream-exit) { animation: aiFade 0.4s ease; }
-.si-conv.stream-exit { animation: streamExit 0.4s cubic-bezier(0.4, 0, 1, 1) forwards; }
+.si-conv.wave-in { animation: waterfallIn 0.4s ease forwards; }
+.si-conv:not(.si-inserting):not(.stream-exit):not(.wave-in) { animation: aiFade 0.4s ease; }
+.si-conv.stream-exit { animation: streamExit 0.35s ease forwards; }
 
 /* ═══ Insertion Animation — AI slides in elegantly ═══ */
 .si-inserting {
@@ -1326,38 +1334,16 @@ body {
   }
 }
 
-/* ═══ Waterfall-in — entry loads top-to-bottom with staggered fade ═══ */
+/* ═══ Waterfall-in — pure opacity cascade, no layout shift ═══ */
 @keyframes waterfallIn {
-  0% {
-    opacity: 0;
-    transform: translateY(12px);
-    filter: blur(3px);
-  }
-  40% {
-    opacity: 0.5;
-    filter: blur(1px);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
-  }
+  0% { opacity: 0; }
+  100% { opacity: 1; }
 }
 
-/* ═══ Stream exit — content fades and drifts up smoothly ═══ */
+/* ═══ Stream exit — pure fade out ═══ */
 @keyframes streamExit {
-  0% {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-  60% {
-    opacity: 0.3;
-    transform: translateY(-10px) scale(0.99);
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(-20px) scale(0.98);
-  }
+  0% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 .conv-text { white-space: pre-wrap; word-break: break-word; }
