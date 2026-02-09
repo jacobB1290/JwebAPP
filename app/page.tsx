@@ -210,10 +210,20 @@ function chartColor(i: number, a: number) {
 function SidePanel({ open, onClose, onLoadEntry, onDeleteEntry }: { open: boolean; onClose: () => void; onLoadEntry: (id: string) => void; onDeleteEntry: (id: string) => void }) {
   const [entries, setEntries] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
+  const [loaded, setLoaded] = useState(false)  // tracks if first load is done for fade-in
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
-  useEffect(() => { if (open) { loadEntries(); setConfirmDelete(null) } }, [open])
-  const loadEntries = async () => { setLoading(true); try { const r = await fetch('/api/entries'); if (r.ok) { const d = await r.json(); setEntries(d.entries || []) } } catch {} setLoading(false) }
+  useEffect(() => { if (open) { setLoaded(false); loadEntries(); setConfirmDelete(null) } }, [open])
+  const loadEntries = async () => {
+    setLoading(true)
+    try {
+      const r = await fetch('/api/entries')
+      if (r.ok) { const d = await r.json(); setEntries(d.entries || []) }
+    } catch {}
+    setLoading(false)
+    // Small delay so the fade-in starts after React renders the entries
+    requestAnimationFrame(() => { requestAnimationFrame(() => setLoaded(true)) })
+  }
 
   const doDelete = async (id: string) => {
     try {
@@ -238,16 +248,20 @@ function SidePanel({ open, onClose, onLoadEntry, onDeleteEntry }: { open: boolea
           <span className="p-title">Your Notebook</span>
           <button className="p-close" onClick={onClose}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></button>
         </div>
-        <div className="p-body">
+        <div className={`p-body ${!loading && loaded ? 'p-loaded' : ''}`}>
           {loading && <div className="p-loading"><div className="thinking"><span className="t-dot" /><span className="t-dot" /><span className="t-dot" /></div></div>}
           {!loading && entries.length === 0 && <div className="p-empty">No entries yet. Start writing.</div>}
-          {Object.entries(grouped).map(([folder, ents]) => (
-            <div key={folder} className="fgrp">
-              <div className="fname"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>{folder}</div>
-              {ents.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}
+          {!loading && entries.length > 0 && (
+            <div className="p-entries">
+              {Object.entries(grouped).map(([folder, ents]) => (
+                <div key={folder} className="fgrp">
+                  <div className="fname"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>{folder}</div>
+                  {ents.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}
+                </div>
+              ))}
+              {uncategorized.length > 0 && <div className="fgrp"><div className="fname">Uncategorized</div>{uncategorized.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}</div>}
             </div>
-          ))}
-          {uncategorized.length > 0 && <div className="fgrp"><div className="fname">Uncategorized</div>{uncategorized.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}</div>}
+          )}
         </div>
       </div>
     </>
@@ -405,12 +419,14 @@ export default function Home() {
       stream: prev.stream.map((item, i) => ({
         ...item,
         exiting: true,
-        exitDelay: i * 30,  // stagger each item 30ms
+        exitDelay: i * 25,  // stagger each item 25ms
       })),
     }))
 
-    // After animation completes, clear everything
-    const duration = Math.min(streamRef.current.length * 30, 400) + 500
+    // After the LAST item's animation finishes (delay + duration), clear everything
+    // Each item: exitDelay + 400ms animation = total time for that item
+    const lastItemDelay = Math.min((streamRef.current.length - 1) * 25, 350)
+    const duration = lastItemDelay + 450 + 100  // +100ms extra buffer for smoothness
     setTimeout(() => {
       exitingRef.current = false
       s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null })
@@ -927,10 +943,11 @@ export default function Home() {
       <div id="canvas">
         <div id="stream">
           {state.stream.map((item, i) => {
+            // For wave-in: start hidden via inline style so there's zero flash before animation starts
             const waveStyle = item.animating && item.waveDelay != null
-              ? { animationDelay: `${item.waveDelay}ms` } as React.CSSProperties
+              ? { animationDelay: `${item.waveDelay}ms`, opacity: 0 } as React.CSSProperties
               : item.animating
-              ? { animationDelay: `${Math.min(i * 40, 600)}ms` } as React.CSSProperties
+              ? { animationDelay: `${Math.min(i * 40, 600)}ms`, opacity: 0 } as React.CSSProperties
               : {}
 
             const exitStyle = item.exiting
@@ -1254,8 +1271,8 @@ body {
 
 /* User writing — looks like text on a page */
 .si-writing { padding: 0 0 4px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.15s ease; }
-.si-writing.wave-in { animation: waterfallIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) both; }
-.si-writing.stream-exit { animation: streamExit 0.45s cubic-bezier(0.55, 0, 1, 0.45) both; }
+.si-writing.wave-in { animation: waterfallIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.si-writing.stream-exit { animation: streamExit 0.4s cubic-bezier(0.4, 0, 1, 1) forwards; }
 
 /* Merged header — divider when a past entry is pulled into the thread */
 .si-merge-header {
@@ -1265,8 +1282,8 @@ body {
   margin: 20px 0 16px;
   cursor: default;
 }
-.si-merge-header.wave-in { animation: waterfallIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) both; }
-.si-merge-header.stream-exit { animation: streamExit 0.45s cubic-bezier(0.55, 0, 1, 0.45) both; }
+.si-merge-header.wave-in { animation: waterfallIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.si-merge-header.stream-exit { animation: streamExit 0.4s cubic-bezier(0.4, 0, 1, 1) forwards; }
 .merge-line { flex: 1; height: 1px; background: var(--divider); }
 .merge-label {
   font-family: 'DM Sans', sans-serif;
@@ -1281,7 +1298,7 @@ body {
 /* AI Annotation — margin note with accent bar, inline in the flow */
 .si-annotation { display: flex; gap: 0; margin: 8px 0 12px; cursor: default; }
 .si-annotation:not(.si-inserting):not(.stream-exit) { animation: aiFade 0.4s ease; }
-.si-annotation.stream-exit { animation: streamExit 0.45s cubic-bezier(0.55, 0, 1, 0.45) both; }
+.si-annotation.stream-exit { animation: streamExit 0.4s cubic-bezier(0.4, 0, 1, 1) forwards; }
 .anno-bar { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.5; flex-shrink: 0; }
 .anno-body { padding: 4px 0 4px 14px; font-size: 0.84rem; color: var(--text-muted); line-height: 1.6; }
 .anno-text { white-space: pre-wrap; word-break: break-word; }
@@ -1291,11 +1308,11 @@ body {
 /* AI Conversational — gentle inline note */
 .si-conv { margin: 10px 0 14px; padding: 14px 18px; background: var(--conv-bg); border-radius: 12px; cursor: default; font-size: 0.92rem; line-height: 1.65; }
 .si-conv:not(.si-inserting):not(.stream-exit) { animation: aiFade 0.4s ease; }
-.si-conv.stream-exit { animation: streamExit 0.45s cubic-bezier(0.55, 0, 1, 0.45) both; }
+.si-conv.stream-exit { animation: streamExit 0.4s cubic-bezier(0.4, 0, 1, 1) forwards; }
 
 /* ═══ Insertion Animation — AI slides in elegantly ═══ */
 .si-inserting {
-  animation: insertSlide 0.65s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: insertSlide 0.65s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   transform-origin: top;
 }
 
@@ -1340,17 +1357,19 @@ body {
   }
 }
 
-/* ═══ Stream exit — content rises up and fades out ═══ */
+/* ═══ Stream exit — content fades and drifts up smoothly ═══ */
 @keyframes streamExit {
   0% {
     opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+  60% {
+    opacity: 0.3;
+    transform: translateY(-10px) scale(0.99);
   }
   100% {
     opacity: 0;
-    transform: translateY(-18px);
-    filter: blur(2px);
+    transform: translateY(-20px) scale(0.98);
   }
 }
 
@@ -1436,8 +1455,10 @@ body {
 .p-close { background: none; border: none; cursor: pointer; color: var(--text-muted); padding: 8px; border-radius: 8px; transition: background 0.15s; display: flex; align-items: center; justify-content: center; }
 .p-close:hover { background: var(--hover-bg); }
 .p-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
-.p-loading { padding: 40px 0; display: flex; justify-content: center; }
-.p-empty { color: var(--text-light); font-size: 0.88rem; padding: 40px 0; text-align: center; line-height: 1.6; }
+.p-entries { opacity: 0; transform: translateY(6px); transition: opacity 0.35s ease, transform 0.35s ease; }
+.p-loaded .p-entries { opacity: 1; transform: translateY(0); }
+.p-loading { padding: 40px 0; display: flex; justify-content: center; animation: fadeIn 0.2s ease; }
+.p-empty { color: var(--text-light); font-size: 0.88rem; padding: 40px 0; text-align: center; line-height: 1.6; opacity: 0; animation: fadeUp 0.4s ease 0.1s forwards; }
 .fgrp { margin-bottom: 20px; }
 .fname { font-family: 'DM Sans', sans-serif; font-size: 0.7rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-light); margin-bottom: 6px; padding-left: 4px; display: flex; align-items: center; gap: 6px; }
 .ecard { display: flex; align-items: center; border-radius: 12px; transition: background 0.2s, transform 0.15s; margin-bottom: 2px; }
@@ -1462,6 +1483,7 @@ body {
   .tbtn { padding: 12px; }
   .panel { width: 88vw; }
   .p-body { padding: 16px; }
+  .fgrp { margin-bottom: 16px; }
   .tool-chart { max-height: 180px; }
   .topbar-title { font-size: 0.62rem; }
   #send-hint { padding: 10px 16px; }
