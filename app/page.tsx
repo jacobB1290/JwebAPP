@@ -46,6 +46,7 @@ interface AppState {
   model: string
   models: ModelOption[]
   modelPickerOpen: boolean
+  streamFadeMs: number  // >0 = stream container fading in over this duration
 }
 
 // ═══════════════════════════════════════════
@@ -301,6 +302,7 @@ export default function Home() {
     model: typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-haiku-4.5') : 'claude-haiku-4.5',
     models: [],
     modelPickerOpen: false,
+    streamFadeMs: 0,
   })
 
   const [input, setInput] = useState('')
@@ -403,7 +405,7 @@ export default function Home() {
   const newEntry = () => {
     if (streamRef.current.length === 0) {
       // Nothing to animate out — just reset
-      s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null })
+      s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null, streamFadeMs: 0 })
       lastSentRef.current = ''
       allTextRef.current = ''
       queueRef.current = []
@@ -430,7 +432,7 @@ export default function Home() {
     const duration = lastItemDelay + 450 + 100  // +100ms extra buffer for smoothness
     setTimeout(() => {
       exitingRef.current = false
-      s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null })
+      s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null, streamFadeMs: 0 })
       lastSentRef.current = ''
       allTextRef.current = ''
       queueRef.current = []
@@ -515,6 +517,7 @@ export default function Home() {
         lastSentRef.current = allTextRef.current
 
         setInput('')
+        const fadeDuration = items.length * 80 + 400  // matches full waterfall duration
         s({
           entryId,
           stream: items,
@@ -523,6 +526,7 @@ export default function Home() {
           greetingVisible: false,
           entryTitle: data.entry.title || null,
           continuationChecked: true,
+          streamFadeMs: fadeDuration,
         })
 
         // Scroll to bottom AFTER waterfall animation completes
@@ -929,7 +933,7 @@ export default function Home() {
 
       {/* Canvas — the journal page with interleaved writing and AI */}
       <div id="canvas">
-        <div id="stream">
+        <div id="stream" className={state.streamFadeMs > 0 ? 'stream-fade' : ''} style={state.streamFadeMs > 0 ? { animationDuration: `${state.streamFadeMs}ms` } as React.CSSProperties : undefined}>
           {state.stream.map((item, i) => {
             // Wave-in items: 'both' fill-mode applies opacity:0 during the delay
             // period (backwards) and holds opacity:1 after completion (forwards)
@@ -1259,7 +1263,9 @@ body {
 
 /* ═══ Canvas ═══ */
 #canvas { max-width: 680px; width: 100%; margin: 0 auto; padding: 64px 24px 120px; min-height: 100dvh; }
-#stream { display: flex; flex-direction: column; gap: 0; transition: opacity 0.3s ease; }
+#stream { display: flex; flex-direction: column; gap: 0; }
+#stream.stream-fade { animation: streamFadeIn ease both; }
+@keyframes streamFadeIn { 0% { opacity: 0; } 100% { opacity: 1; } }
 
 /* ═══ Stream Items — INLINE ═══ */
 
