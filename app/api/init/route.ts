@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
-import { callLLMSimple, GREETING_PROMPT } from '@/lib/openai'
+import { callLLMSimple, GREETING_PROMPT } from '@/lib/llm'
 import { validateAuth, authError } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: NextRequest) {
   if (!validateAuth(request)) return authError()
+
+  // Read model from query param (optional — client may send it)
+  const model = request.nextUrl.searchParams.get('model') || undefined
 
   try {
     // Load context memo
@@ -55,7 +58,7 @@ Recent entries: ${JSON.stringify((recentEntries || []).slice(0, 5).map(e => ({
   id: e.id,
 })))}`
 
-      const result = await callLLMSimple(GREETING_PROMPT, greetingContext)
+      const result = await callLLMSimple(GREETING_PROMPT, greetingContext, model)
       greeting = result.greeting || ''
       recentEntryId = result.recent_entry_id || null
       recentEntryTopic = result.recent_entry_topic || null

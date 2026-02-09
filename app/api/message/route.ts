@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
-import { callLLM, SYSTEM_PROMPT } from '@/lib/openai'
+import { callLLM, SYSTEM_PROMPT } from '@/lib/llm'
 import { validateAuth, authError } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
   if (!validateAuth(request)) return authError()
 
   try {
-    const { text, entryId, sessionMessages, userRequestedResponse } = await request.json()
+    const { text, entryId, sessionMessages, userRequestedResponse, model } = await request.json()
 
     if (!text?.trim()) {
       return NextResponse.json({ error: 'No text provided' }, { status: 400 })
@@ -52,8 +52,8 @@ user_requested_response: ${userRequestedResponse}
 current_entry_id: ${entryId || '(new entry)'}
 timestamp: ${new Date().toISOString()}`
 
-    // Call LLM — no fallback
-    const llmResponse = await callLLM(SYSTEM_PROMPT, llmInput)
+    // Call LLM — route to the selected model (or default)
+    const llmResponse = await callLLM(SYSTEM_PROMPT, llmInput, undefined, true, model)
 
     let responses = llmResponse.responses || []
 
@@ -204,14 +204,14 @@ timestamp: ${new Date().toISOString()}`
     console.error('Message error:', err?.message || err)
     const msg = err?.message || ''
     let userError = 'AI couldn\u2019t respond right now. Your writing is saved \u2014 try again in a moment.'
-    if (msg.includes('401') || msg.includes('invalid')) {
-      userError = 'OpenAI API key is invalid. Check your configuration.'
-    } else if (msg.includes('insufficient_quota') || msg.includes('exceeded your current quota')) {
-      userError = 'OpenAI account out of credits. Add funds at platform.openai.com/settings/organization/billing'
-    } else if (msg.includes('429')) {
+    if (msg.includes('401') || msg.includes('invalid') || msg.includes('authentication')) {
+      userError = 'API key is invalid. Check your configuration.'
+    } else if (msg.includes('insufficient_quota') || msg.includes('exceeded your current quota') || msg.includes('credit')) {
+      userError = 'API account out of credits. Check your billing settings.'
+    } else if (msg.includes('429') || msg.includes('rate')) {
       userError = 'Rate limit hit \u2014 too many requests. Wait a minute and try again.'
-    } else if (msg.includes('500') || msg.includes('503')) {
-      userError = 'OpenAI is having issues. Your writing is safe \u2014 try again shortly.'
+    } else if (msg.includes('500') || msg.includes('503') || msg.includes('overloaded')) {
+      userError = 'AI provider is having issues. Your writing is safe \u2014 try again shortly.'
     }
     return NextResponse.json({ error: userError }, { status: 500 })
   }

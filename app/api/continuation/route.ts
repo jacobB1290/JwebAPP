@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
-import { callLLMSimple, CONTINUATION_PROMPT } from '@/lib/openai'
+import { callLLMSimple, CONTINUATION_PROMPT } from '@/lib/llm'
 import { validateAuth, authError } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
   if (!validateAuth(request)) return authError()
 
   try {
-    const { text } = await request.json()
+    const { text, model } = await request.json()
 
     // Get recent entries with their first message
     const { data: recentEntries } = await supabase
@@ -52,7 +52,7 @@ User's new text: "${text}"
 
 Is this a continuation of one of the recent entries, or something new?`
 
-    const result = await callLLMSimple(CONTINUATION_PROMPT, checkInput)
+    const result = await callLLMSimple(CONTINUATION_PROMPT, checkInput, model)
 
     if (result.is_continuation && result.confidence > 0.6 && result.continuation_entry_id) {
       const { data: msgs } = await supabase

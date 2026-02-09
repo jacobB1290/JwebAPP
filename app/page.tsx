@@ -17,6 +17,13 @@ interface StreamItem {
   mergedFrom?: string  // entry title for merged content
 }
 
+interface ModelOption {
+  id: string
+  label: string
+  provider: string
+  available: boolean
+}
+
 interface AppState {
   authed: boolean
   loading: boolean
@@ -32,6 +39,9 @@ interface AppState {
   theme: 'light' | 'dark'
   error: string | null
   entryTitle: string | null
+  model: string
+  models: ModelOption[]
+  modelPickerOpen: boolean
 }
 
 // ═══════════════════════════════════════════
@@ -225,6 +235,9 @@ export default function Home() {
     recentEntryId: null, recentEntryTopic: null,
     continuationChecked: false, panelOpen: false,
     theme: 'light', error: null, entryTitle: null,
+    model: typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-sonnet-4.5') : 'claude-sonnet-4.5',
+    models: [],
+    modelPickerOpen: false,
   })
 
   const [input, setInput] = useState('')
@@ -239,6 +252,7 @@ export default function Home() {
   const queueRef = useRef<Array<{ text: string; userRequested: boolean; insertIdx: number }>>([])
   const processingRef = useRef(false)
   const continuationCheckedRef = useRef(false)  // ref mirror to avoid stale closures
+  const modelRef = useRef(typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-sonnet-4.5') : 'claude-sonnet-4.5')
 
   const s = useCallback((update: Partial<AppState> | ((prev: AppState) => AppState)) => {
     if (typeof update === 'function') setState(update)
@@ -250,6 +264,7 @@ export default function Home() {
   useEffect(() => { streamRef.current = state.stream }, [state.stream])
   useEffect(() => { entryIdRef.current = state.entryId }, [state.entryId])
   useEffect(() => { continuationCheckedRef.current = state.continuationChecked }, [state.continuationChecked])
+  useEffect(() => { modelRef.current = state.model }, [state.model])
 
   // ─── Theme ───
   useEffect(() => {
@@ -261,21 +276,39 @@ export default function Home() {
   // ─── Auth ───
   useEffect(() => { checkAuth() }, [])
 
+  // ─── Load available models ───
+  const loadModels = async () => {
+    try {
+      const res = await fetch('/api/models')
+      if (res.ok) {
+        const data = await res.json()
+        s({ models: data.models || [] })
+      }
+    } catch {}
+  }
+
   const checkAuth = async () => {
     try {
       const res = await fetch('/api/init')
       if (res.ok) {
         const data = await res.json()
         s({ authed: true, loading: false, greeting: data.greeting || 'Write something.', recentEntryId: data.recentEntryId, recentEntryTopic: data.recentEntryTopic })
+        loadModels()
       } else if (res.status === 401) {
         s({ authed: false, loading: false })
       } else {
         s({ authed: true, loading: false, greeting: 'Hey. Write something.' })
+        loadModels()
       }
     } catch { s({ authed: false, loading: false, error: 'Failed to connect' }) }
   }
 
   const onLogin = async () => { s({ loading: true }); await checkAuth() }
+
+  const setModel = (id: string) => {
+    s({ model: id, modelPickerOpen: false })
+    localStorage.setItem('sn-model', id)
+  }
 
   const toggleTheme = () => {
     const next = state.theme === 'dark' ? 'light' : 'dark'
@@ -289,8 +322,9 @@ export default function Home() {
 
   const focusInput = useCallback(() => {
     if (state.greetingVisible) s({ greetingVisible: false })
+    if (state.modelPickerOpen) s({ modelPickerOpen: false })
     setTimeout(() => inputRef.current?.focus(), 50)
-  }, [state.greetingVisible, s])
+  }, [state.greetingVisible, state.modelPickerOpen, s])
 
   // ─── New entry ───
   const newEntry = () => {
@@ -391,7 +425,7 @@ export default function Home() {
     continuationCheckedRef.current = true  // set ref immediately to prevent double-fire
     s({ continuationChecked: true })
     try {
-      const res = await fetch('/api/continuation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) })
+      const res = await fetch('/api/continuation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, model: modelRef.current }) })
       const data = await res.json()
       if (data.isContinuation && data.entryId) {
         const items: StreamItem[] = (data.messages || []).map((m: any) => ({
@@ -416,6 +450,10 @@ export default function Home() {
   const enqueueMessage = (text: string, userRequested: boolean) => {
     if (!text.trim()) return
 
+    // ─── FIRST MESSAGE FIX: Force response when entryId is null and stream is empty ───
+    const isFirstMessage = !entryIdRef.current && streamRef.current.length === 0
+    const forceResponse = userRequested || isFirstMessage
+
     // Once the user has sent a message, continuation check is done — lock it
     if (!continuationCheckedRef.current) {
       continuationCheckedRef.current = true
@@ -428,7 +466,7 @@ export default function Home() {
     // Push to queue SYNCHRONOUSLY before setState — 
     // setState callback is batched and may not run before processQueue reads the queue
     const insertIdx = streamRef.current.length  // current stream length = index of new writing item
-    queueRef.current.push({ text, userRequested, insertIdx })
+    queueRef.current.push({ text, userRequested: forceResponse, insertIdx })
 
     s(prev => ({
       ...prev,
@@ -476,6 +514,7 @@ export default function Home() {
           entryId: entryIdRef.current,
           sessionMessages: recentContext,
           userRequestedResponse: userRequested,
+          model: modelRef.current,
         }),
       })
 
@@ -629,10 +668,11 @@ export default function Home() {
   // ─── Manual send (Ctrl+Enter / Shift+Enter / button) ───
   const manualSend = () => {
     resetAutoTrigger()
-    // Read directly from the textarea DOM element to avoid stale React state
-    const text = (inputRef.current?.value || input).trim()
+    // ALWAYS read from the DOM ref first — React state may be stale due to batching
+    const text = (inputRef.current?.value ?? '').trim() || input.trim()
     if (!text) return
     wordCountAtLastSendRef.current = 0
+    // Manual sends always request a response (true), first-message logic handled in enqueue
     enqueueMessage(text, true)
   }
 
@@ -668,6 +708,36 @@ export default function Home() {
         )}
 
         <div className="topbar-right">
+          {/* Model Picker */}
+          <div className="model-picker-wrap" onClick={e => e.stopPropagation()}>
+            <button className="tbtn model-btn" onClick={() => s({ modelPickerOpen: !state.modelPickerOpen })} title="Change AI model">
+              <span className="model-badge">{state.model === 'claude-sonnet-4.5' ? 'Claude' : 'GPT'}</span>
+            </button>
+            {state.modelPickerOpen && (
+              <div className="model-dropdown">
+                {state.models.length > 0 ? state.models.filter(m => m.available).map(m => (
+                  <button key={m.id} className={`model-opt ${state.model === m.id ? 'active' : ''}`} onClick={() => setModel(m.id)}>
+                    <span className="model-opt-label">{m.label}</span>
+                    <span className="model-opt-provider">{m.provider}</span>
+                    {state.model === m.id && <span className="model-check">&#10003;</span>}
+                  </button>
+                )) : (
+                  <>
+                    <button className={`model-opt ${state.model === 'claude-sonnet-4.5' ? 'active' : ''}`} onClick={() => setModel('claude-sonnet-4.5')}>
+                      <span className="model-opt-label">Claude Sonnet 4.5</span>
+                      <span className="model-opt-provider">anthropic</span>
+                      {state.model === 'claude-sonnet-4.5' && <span className="model-check">&#10003;</span>}
+                    </button>
+                    <button className={`model-opt ${state.model === 'gpt-5.2' ? 'active' : ''}`} onClick={() => setModel('gpt-5.2')}>
+                      <span className="model-opt-label">GPT-5.2</span>
+                      <span className="model-opt-provider">openai</span>
+                      {state.model === 'gpt-5.2' && <span className="model-check">&#10003;</span>}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
           <button className="tbtn" onClick={toggleTheme} title="Toggle theme">
             {state.theme === 'dark'
               ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" /></svg>
@@ -838,10 +908,58 @@ body {
 /* ═══ Top Bar ═══ */
 #topbar { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; z-index: 100; padding-top: max(12px, env(safe-area-inset-top)); background: linear-gradient(to bottom, var(--bg) 60%, transparent); cursor: default; }
 .topbar-title { flex: 1; text-align: center; font-family: 'DM Sans', sans-serif; font-size: 0.7rem; color: var(--text-light); letter-spacing: 0.04em; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
-.topbar-right { display: flex; gap: 2px; }
+.topbar-right { display: flex; gap: 2px; align-items: center; }
 .tbtn { background: none; border: none; cursor: pointer; color: var(--text-light); padding: 10px; border-radius: 10px; transition: all 0.25s; opacity: 0.4; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
 .tbtn:hover { opacity: 1; color: var(--text-muted); background: var(--hover-bg); }
 .tbtn:active { opacity: 1; transform: scale(0.92); }
+
+/* ═══ Model Picker ═══ */
+.model-picker-wrap { position: relative; }
+.model-btn { opacity: 0.5 !important; padding: 6px 10px !important; }
+.model-btn:hover { opacity: 0.8 !important; }
+.model-badge {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  background: var(--tag-bg);
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.model-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--panel-bg);
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+  padding: 4px;
+  min-width: 200px;
+  box-shadow: 0 8px 32px var(--shadow-md);
+  z-index: 150;
+  animation: fadeUp 0.2s ease;
+}
+.model-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.15s;
+  text-align: left;
+}
+.model-opt:hover { background: var(--hover-bg); }
+.model-opt.active { background: var(--accent-bg); }
+.model-opt-label { font-family: 'DM Sans', sans-serif; font-size: 0.82rem; color: var(--text); flex: 1; }
+.model-opt-provider { font-family: 'DM Sans', sans-serif; font-size: 0.62rem; color: var(--text-light); text-transform: uppercase; letter-spacing: 0.04em; }
+.model-check { color: var(--accent); font-size: 0.72rem; font-weight: 600; }
 
 /* ═══ Thinking Indicator — top center ═══ */
 .topbar-thinking {
