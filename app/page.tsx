@@ -8,12 +8,13 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 
 interface StreamItem {
   id?: string
-  type: 'writing' | 'ai-annotation' | 'ai-conversational'
+  type: 'writing' | 'ai-annotation' | 'ai-conversational' | 'merged-header'
   content: string
   tone?: string
   linked_entry_id?: string | null
   tool_call?: any
-  animating?: boolean  // true when freshly inserted — triggers CSS animation
+  animating?: boolean
+  mergedFrom?: string  // entry title for merged content
 }
 
 interface AppState {
@@ -110,7 +111,6 @@ function ToolRender({ toolCall, messageId, onLoadEntry }: { toolCall: any; messa
 
   const toggleCheck = async (idx: number) => { if (!messageId) return; try { await fetch('/api/checklist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messageId, itemIndex: idx }) }) } catch {} }
 
-  // load_entry tool is handled by the parent (auto-loads the entry) — don't render anything for it
   if (toolCall.type === 'load_entry') return null
 
   return (
@@ -231,16 +231,23 @@ export default function Home() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const autoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSentRef = useRef('')
-  const allTextRef = useRef('') // all user text accumulated
+  const allTextRef = useRef('')
   const busyRef = useRef(false)
   const streamEndRef = useRef<HTMLDivElement>(null)
+  const streamRef = useRef<StreamItem[]>([])  // mirror of state.stream for async access
+  const entryIdRef = useRef<string | null>(null)
+  const queueRef = useRef<Array<{ text: string; userRequested: boolean; insertIdx: number }>>([])
+  const processingRef = useRef(false)
 
   const s = useCallback((update: Partial<AppState> | ((prev: AppState) => AppState)) => {
     if (typeof update === 'function') setState(update)
     else setState(prev => ({ ...prev, ...update }))
   }, [])
 
+  // Keep refs in sync
   useEffect(() => { busyRef.current = state.busy }, [state.busy])
+  useEffect(() => { streamRef.current = state.stream }, [state.stream])
+  useEffect(() => { entryIdRef.current = state.entryId }, [state.entryId])
 
   // ─── Theme ───
   useEffect(() => {
@@ -261,7 +268,6 @@ export default function Home() {
       } else if (res.status === 401) {
         s({ authed: false, loading: false })
       } else {
-        // Non-401 error — still let user in with a fallback greeting
         s({ authed: true, loading: false, greeting: 'Hey. Write something.' })
       }
     } catch { s({ authed: false, loading: false, error: 'Failed to connect' }) }
@@ -289,62 +295,82 @@ export default function Home() {
     s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null })
     lastSentRef.current = ''
     allTextRef.current = ''
+    queueRef.current = []
     setInput('')
     setTimeout(() => inputRef.current?.focus(), 100)
   }
 
-  // ─── Delete handler (called from panel) ───
   const onDeleteEntry = (id: string) => {
-    // If we're viewing the deleted entry, reset to blank
     if (state.entryId === id) newEntry()
   }
 
-  // ─── Load existing entry — rebuild as interleaved stream with wave animation ───
-  const loadEntry = async (entryId: string) => {
+  // ─── Load entry — MERGE into current thread, don't replace ───
+  const loadEntry = async (entryId: string, isMerge?: boolean) => {
     try {
       const res = await fetch(`/api/entries/${entryId}`)
       if (!res.ok) return
       const data = await res.json()
       if (!data.entry) return
 
-      // Convert messages to stream items — mark all as animating for wave effect
-      const items: StreamItem[] = (data.messages || []).map((m: any, idx: number) => ({
+      const items: StreamItem[] = (data.messages || []).map((m: any) => ({
         id: m.id,
         type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
         content: m.content,
         tone: m.tone,
         linked_entry_id: m.linked_entry_id,
         tool_call: m.tool_call,
-        animating: true, // triggers wave-in animation
+        animating: true,
       }))
 
-      // Rebuild allTextRef from user messages
-      allTextRef.current = items.filter(i => i.type === 'writing').map(i => i.content).join('\n\n')
-      lastSentRef.current = allTextRef.current
+      // If we're merging (from AI tool call or link), insert into current stream
+      // If we're loading fresh (from sidebar or greeting), replace
+      if (isMerge && streamRef.current.length > 0) {
+        // Insert a "merged header" + the loaded items above the current stream content
+        const mergeHeader: StreamItem = {
+          type: 'merged-header',
+          content: data.entry.title || 'Past Entry',
+          mergedFrom: data.entry.title,
+          animating: true,
+        }
 
-      setInput('')
-      s({
-        entryId,
-        stream: items,
-        panelOpen: false,
-        error: null,
-        greetingVisible: false,
-        entryTitle: data.entry.title || null,
-        continuationChecked: true,
-      })
+        s(prev => ({
+          ...prev,
+          stream: [mergeHeader, ...items, ...prev.stream],
+          panelOpen: false,
+          error: null,
+          greetingVisible: false,
+          // Keep current entryId — we're adding context, not switching entries
+        }))
 
-      // Remove animation flags after animation completes
+        // Scroll to the merged content (top)
+        setTimeout(() => {
+          window.scrollTo({ top: 0, behavior: 'smooth' })
+        }, 100)
+      } else {
+        // Full load — replace stream (sidebar click or first load)
+        allTextRef.current = items.filter(i => i.type === 'writing').map(i => i.content).join('\n\n')
+        lastSentRef.current = allTextRef.current
+
+        setInput('')
+        s({
+          entryId,
+          stream: items,
+          panelOpen: false,
+          error: null,
+          greetingVisible: false,
+          entryTitle: data.entry.title || null,
+          continuationChecked: true,
+        })
+        setTimeout(() => { scrollToBottom(); inputRef.current?.focus() }, 100)
+      }
+
+      // Remove animation flags after wave completes
       setTimeout(() => {
         s(prev => ({
           ...prev,
           stream: prev.stream.map(item => ({ ...item, animating: false })),
         }))
       }, items.length * 40 + 600)
-
-      setTimeout(() => {
-        scrollToBottom()
-        inputRef.current?.focus()
-      }, 100)
     } catch {}
   }
 
@@ -369,30 +395,51 @@ export default function Home() {
     } catch {}
   }
 
-  // ─── Commit current input into the stream and send to model ───
-  const sendToModel = async (userRequested: boolean) => {
-    const text = input.trim()
-    if (busyRef.current || !text) return
+  // ═══════════════════════════════════════════
+  // NON-BLOCKING SEND QUEUE
+  // ═══════════════════════════════════════════
+  // User commits text → it goes to the queue → queue processes one at a time
+  // Textarea is NEVER disabled. User keeps writing while AI thinks.
 
-    // Commit the current input as a writing block in the stream
+  const enqueueMessage = (text: string, userRequested: boolean) => {
+    if (!text.trim()) return
+
+    // Commit the text as a writing block immediately
     const writingItem: StreamItem = { type: 'writing', content: text }
 
-    // Capture the insertion point — AI response will go after this index
-    const insertAfterIndex = state.stream.length // index of the new writing item
+    s(prev => {
+      const newStream = [...prev.stream, writingItem]
+      const insertIdx = newStream.length - 1  // index of writing item we just added
+      queueRef.current.push({ text, userRequested, insertIdx })
+      return { ...prev, stream: newStream, error: null }
+    })
 
-    // Update tracking
     allTextRef.current = (allTextRef.current ? allTextRef.current + '\n\n' : '') + text
-    const delta = text
-
-    // Clear input but DON'T disable it — user keeps writing
     setInput('')
-    busyRef.current = true
-    s(prev => ({ ...prev, busy: true, error: null, stream: [...prev.stream, writingItem] }))
     scrollToBottom()
 
+    // Start processing if not already running
+    processQueue()
+  }
+
+  const processQueue = async () => {
+    if (processingRef.current) return
+    processingRef.current = true
+    s({ busy: true })
+
+    while (queueRef.current.length > 0) {
+      const job = queueRef.current.shift()!
+      await processOneMessage(job.text, job.userRequested, job.insertIdx)
+    }
+
+    processingRef.current = false
+    s({ busy: false })
+  }
+
+  const processOneMessage = async (text: string, userRequested: boolean, originalInsertIdx: number) => {
     try {
-      // Build session context from recent stream (use latest state)
-      const currentStream = [...state.stream, writingItem]
+      // Build session context from current stream state
+      const currentStream = streamRef.current
       const recentContext = currentStream.slice(-15).map(i => ({
         sender: i.type === 'writing' ? 'user' : 'ai',
         content: i.content,
@@ -403,8 +450,8 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: delta,
-          entryId: state.entryId,
+          text,
+          entryId: entryIdRef.current,
           sessionMessages: recentContext,
           userRequestedResponse: userRequested,
         }),
@@ -412,60 +459,91 @@ export default function Home() {
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Something went wrong' }))
-        s({ busy: false, error: err.error || 'Something went wrong' })
+        s({ error: err.error || 'Something went wrong' })
         return
       }
 
       const data = await res.json()
 
-      // Build AI stream items with animation flag
+      // Build AI stream items with animation
       const aiItems: StreamItem[] = (data.responses || []).filter((r: any) => r.content?.trim()).map((r: any) => ({
         id: r.id,
         type: r.type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
         content: r.content,
         tone: r.tone,
         linked_entry_id: r.linked_entry_id,
-        animating: true, // flag for CSS insertion animation
+        animating: true,
       }))
 
-      // Attach tool call to LAST AI item only
       if (data.toolCall && aiItems.length > 0) {
         aiItems[aiItems.length - 1].tool_call = data.toolCall
       } else if (data.toolCall && aiItems.length === 0) {
         aiItems.push({ type: 'ai-annotation', content: '', tool_call: data.toolCall, animating: true })
       }
 
-      // Insert AI items right after the writing block that triggered them
-      // The user may have added MORE writing blocks while we were waiting
-      // So we insert after insertAfterIndex (the writing block's position)
-      s(prev => {
-        const newStream = [...prev.stream]
-        const insertAt = Math.min(insertAfterIndex + 1, newStream.length)
-        newStream.splice(insertAt, 0, ...aiItems)
-        return {
+      // Only insert if there are items to insert
+      if (aiItems.length > 0) {
+        s(prev => {
+          const newStream = [...prev.stream]
+          // Find where this writing block ended up (it may have shifted if earlier items were inserted)
+          // We search for the writing block with matching content near the original index
+          let insertAt = Math.min(originalInsertIdx + 1, newStream.length)
+          // Scan from original position to find a good insertion point after the matching writing block
+          for (let i = Math.max(0, originalInsertIdx - 2); i < Math.min(newStream.length, originalInsertIdx + 5); i++) {
+            if (newStream[i]?.type === 'writing' && newStream[i]?.content === text) {
+              insertAt = i + 1
+              break
+            }
+          }
+          newStream.splice(insertAt, 0, ...aiItems)
+          return {
+            ...prev,
+            entryId: data.entryId,
+            entryTitle: data.entryTitle || prev.entryTitle,
+            stream: newStream,
+          }
+        })
+        scrollToBottom()
+
+        // Remove animation flags after animation completes
+        setTimeout(() => {
+          s(prev => ({
+            ...prev,
+            stream: prev.stream.map(item =>
+              aiItems.some(ai => ai.id === item.id) ? { ...item, animating: false } : item
+            ),
+          }))
+        }, 800)
+      } else {
+        // No AI responses, still update entry metadata
+        s(prev => ({
           ...prev,
           entryId: data.entryId,
           entryTitle: data.entryTitle || prev.entryTitle,
-          stream: newStream,
-          busy: false,
-        }
-      })
-      busyRef.current = false
+        }))
+      }
 
       lastSentRef.current = allTextRef.current
-      if (aiItems.length > 0) scrollToBottom()
 
-      // ─── Handle load_entry tool: auto-load past entry into view ───
+      // Handle load_entry tool: MERGE into current thread
       if (data.toolCall?.type === 'load_entry' && data.toolCall?.data?.entry_id) {
-        setTimeout(() => loadEntry(data.toolCall.data.entry_id), 300)
+        setTimeout(() => loadEntry(data.toolCall.data.entry_id, true), 400)
       }
     } catch {
-      busyRef.current = false
-      s({ busy: false, error: 'Network error — check your connection' })
+      s({ error: 'Network error — check your connection' })
     }
   }
 
-  // ─── Auto-trigger ───
+  // ═══════════════════════════════════════════
+  // SMART AUTO-SEND
+  // ═══════════════════════════════════════════
+  // Don't send on every keystroke or pause.
+  // Detect real paragraph endings: double-Enter, sentence ending after 5+ seconds, long writing stretch after 10 seconds.
+  // Track writing velocity — if user is actively typing, never interrupt.
+
+  const lastKeystrokeRef = useRef<number>(Date.now())
+  const wordCountAtLastSendRef = useRef(0)
+
   const resetAutoTrigger = () => {
     if (autoTimerRef.current) { clearTimeout(autoTimerRef.current); autoTimerRef.current = null }
   }
@@ -473,15 +551,41 @@ export default function Home() {
   const startAutoTrigger = (text: string) => {
     resetAutoTrigger()
     if (!text.trim()) return
+    lastKeystrokeRef.current = Date.now()
+
     const trimmed = text.trimEnd()
     const lastChar = trimmed.charAt(trimmed.length - 1)
     const endsSentence = ['.', '!', '?'].includes(lastChar)
-    const delay = endsSentence ? 3000 : 8000
+    const wordCount = trimmed.split(/\s+/).length
+    const wordsSinceLastSend = wordCount - wordCountAtLastSendRef.current
+
+    // Conditions for auto-send:
+    // 1. Sentence ends + at least 8 words of new content + 5 second pause
+    // 2. Long writing stretch (20+ new words) + 10 second pause (any punctuation)
+    // 3. Very long stretch (40+ words) + 12 second pause (regardless)
+    // On all: must wait for actual pause (no new keystrokes)
+
+    let delay: number
+    if (endsSentence && wordsSinceLastSend >= 8) {
+      delay = 5000  // 5s pause after a sentence with decent content
+    } else if (wordsSinceLastSend >= 20 && endsSentence) {
+      delay = 8000  // 8s for long stretches that end on a sentence
+    } else if (wordsSinceLastSend >= 40) {
+      delay = 12000  // 12s for very long unbroken writing
+    } else {
+      // Not enough content yet — don't auto-send
+      return
+    }
 
     autoTimerRef.current = setTimeout(() => {
+      // Check that user hasn't typed in the last N seconds (actual pause)
+      const timeSinceLastKeystroke = Date.now() - lastKeystrokeRef.current
+      if (timeSinceLastKeystroke < delay - 500) return  // They typed recently — not a real pause
+
       const current = inputRef.current?.value?.trim() || ''
-      if (current && !busyRef.current) {
-        sendToModel(false) // auto = not user requested
+      if (current && !processingRef.current) {
+        wordCountAtLastSendRef.current = current.split(/\s+/).length
+        enqueueMessage(current, false)
       }
     }, delay)
   }
@@ -489,6 +593,7 @@ export default function Home() {
   // ─── Input change ───
   const onInputChange = (val: string) => {
     setInput(val)
+    lastKeystrokeRef.current = Date.now()
     if (state.greetingVisible && val.trim()) s({ greetingVisible: false })
     if (!state.continuationChecked && val.trim().split(/\s+/).length >= 4) {
       checkContinuation(val.trim())
@@ -496,14 +601,16 @@ export default function Home() {
     startAutoTrigger(val)
   }
 
-  // ─── Manual send ───
+  // ─── Manual send (Ctrl+Enter / Shift+Enter) ───
   const manualSend = () => {
     resetAutoTrigger()
-    if (!input.trim() || state.busy) return
-    sendToModel(true)
+    const text = input.trim()
+    if (!text) return
+    wordCountAtLastSendRef.current = 0
+    enqueueMessage(text, true)
   }
 
-  // ─── Auto-resize ───
+  // ─── Auto-resize textarea ───
   useEffect(() => {
     if (inputRef.current) {
       inputRef.current.style.height = 'auto'
@@ -526,6 +633,14 @@ export default function Home() {
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
         </button>
         {state.entryTitle && <div className="topbar-title">{state.entryTitle}</div>}
+
+        {/* ═══ THINKING INDICATOR — top center, non-disruptive ═══ */}
+        {state.busy && (
+          <div className="topbar-thinking">
+            <span className="t-dot-sm" /><span className="t-dot-sm" /><span className="t-dot-sm" />
+          </div>
+        )}
+
         <div className="topbar-right">
           <button className="tbtn" onClick={toggleTheme} title="Toggle theme">
             {state.theme === 'dark'
@@ -553,8 +668,18 @@ export default function Home() {
       <div id="canvas">
         <div id="stream">
           {state.stream.map((item, i) => {
-            const waveDelay = item.animating ? {} : (state.stream.length > 5 && i < state.stream.length - 3)
-              ? { animationDelay: `${Math.min(i * 40, 600)}ms` } : {}
+            const waveDelay = item.animating ? { animationDelay: `${Math.min(i * 40, 600)}ms` } : {}
+
+            // Merged header — shows when a past entry was pulled into the thread
+            if (item.type === 'merged-header') {
+              return (
+                <div key={`merge-${i}`} className={`si-merge-header ${item.animating ? 'wave-in' : ''}`} style={waveDelay}>
+                  <div className="merge-line" />
+                  <span className="merge-label">{item.content}</span>
+                  <div className="merge-line" />
+                </div>
+              )
+            }
 
             if (item.type === 'writing') {
               return <div key={i} className={`si-writing ${item.animating ? 'wave-in' : ''}`} style={waveDelay}>{item.content}</div>
@@ -565,8 +690,8 @@ export default function Home() {
                   <div className="anno-bar" />
                   <div className="anno-body">
                     {item.content && <div className="anno-text">{item.content}</div>}
-                    {item.linked_entry_id && <span className="anno-link" onClick={() => loadEntry(item.linked_entry_id!)}>see related entry</span>}
-                    {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={loadEntry} />}
+                    {item.linked_entry_id && <span className="anno-link" onClick={() => loadEntry(item.linked_entry_id!, true)}>see related entry</span>}
+                    {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={(id) => loadEntry(id, true)} />}
                   </div>
                 </div>
               )
@@ -575,16 +700,13 @@ export default function Home() {
             return (
               <div key={item.id || i} className={`si-conv ${item.animating ? 'si-inserting' : ''}`} onClick={e => e.stopPropagation()} style={waveDelay}>
                 <div className="conv-text">{item.content}</div>
-                {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={loadEntry} />}
+                {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={(id) => loadEntry(id, true)} />}
               </div>
             )
           })}
         </div>
 
-        {/* Thinking */}
-        {state.busy && <div className="thinking-inline"><span className="t-dot" /><span className="t-dot" /><span className="t-dot" /></div>}
-
-        {/* Live input — always at the bottom of the stream, part of the flow */}
+        {/* Live input — always at the bottom of the stream, NEVER disabled */}
         <div id="writing-input" onClick={e => e.stopPropagation()}>
           <textarea
             ref={inputRef}
@@ -597,13 +719,12 @@ export default function Home() {
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); manualSend() }
               if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); manualSend() }
             }}
-            disabled={false}
             autoFocus
           />
         </div>
 
         {/* Send hint */}
-        {input.trim() && !state.busy && (
+        {input.trim() && (
           <div id="send-hint" onClick={e => { e.stopPropagation(); manualSend() }}>
             <span className="send-hint-text">pause & reflect</span>
             <span className="send-hint-key">Ctrl+Enter</span>
@@ -621,7 +742,7 @@ export default function Home() {
         </div>
       )}
 
-      <SidePanel open={state.panelOpen} onClose={() => s({ panelOpen: false })} onLoadEntry={loadEntry} onDeleteEntry={onDeleteEntry} />
+      <SidePanel open={state.panelOpen} onClose={() => s({ panelOpen: false })} onLoadEntry={(id) => loadEntry(id)} onDeleteEntry={onDeleteEntry} />
 
       <style jsx global>{styles}</style>
     </div>
@@ -696,6 +817,34 @@ body {
 .tbtn:hover { opacity: 1; color: var(--text-muted); background: var(--hover-bg); }
 .tbtn:active { opacity: 1; transform: scale(0.92); }
 
+/* ═══ Thinking Indicator — top center ═══ */
+.topbar-thinking {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 20px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--divider);
+  animation: thinkFade 0.4s ease;
+  z-index: 1;
+}
+.t-dot-sm {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.3;
+  animation: breathe 1.4s ease infinite;
+}
+.t-dot-sm:nth-child(2) { animation-delay: 0.2s; }
+.t-dot-sm:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinkFade { from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
+
 /* ═══ Canvas ═══ */
 #canvas { max-width: 680px; width: 100%; margin: 0 auto; padding: 64px 24px 120px; min-height: 100dvh; }
 #stream { display: flex; flex-direction: column; gap: 0; }
@@ -705,6 +854,26 @@ body {
 /* User writing — looks like text on a page */
 .si-writing { padding: 0 0 4px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.15s ease; }
 .si-writing.wave-in { animation: waveIn 0.5s ease both; }
+
+/* Merged header — divider when a past entry is pulled into the thread */
+.si-merge-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0 16px;
+  cursor: default;
+}
+.si-merge-header.wave-in { animation: waveIn 0.5s ease both; }
+.merge-line { flex: 1; height: 1px; background: var(--divider); }
+.merge-label {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.65rem;
+  color: var(--text-light);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  padding: 2px 0;
+}
 
 /* AI Annotation — margin note with accent bar, inline in the flow */
 .si-annotation { display: flex; gap: 0; margin: 8px 0 12px; cursor: default; }
@@ -779,9 +948,8 @@ body {
 }
 #tinput::placeholder { color: var(--text-light); opacity: 0.35; font-style: italic; }
 
-/* ═══ Thinking ═══ */
-.thinking, .thinking-inline { display: flex; gap: 5px; padding: 8px 2px; }
-.thinking-inline { margin: 8px 0; cursor: default; }
+/* ═══ Thinking (panel/loading only) ═══ */
+.thinking { display: flex; gap: 5px; padding: 8px 2px; }
 .t-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: 0.25; animation: breathe 1.4s ease infinite; }
 .t-dot:nth-child(2) { animation-delay: 0.2s; }
 .t-dot:nth-child(3) { animation-delay: 0.4s; }

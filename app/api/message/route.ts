@@ -62,6 +62,8 @@ timestamp: ${new Date().toISOString()}`
       responses = [{ content: 'Pulling that up.', type: 'conversational', tone: 'warm' }]
     }
 
+    // Silence is valid — model chose not to respond. Still save the user's text and update DB.
+
     // CRITICAL: If entryId was provided, FORCE append — don't let LLM accidentally create a new entry
     let dbAction = llmResponse.database_action || { type: 'create_new_entry' }
     if (entryId && dbAction.type === 'create_new_entry') {
