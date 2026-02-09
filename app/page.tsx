@@ -532,14 +532,8 @@ export default function Home() {
         }, totalWaveDuration)
       }
 
-      // Remove animation flags after wave completes
-      const clearDelay = items.length * 60 + 600
-      setTimeout(() => {
-        s(prev => ({
-          ...prev,
-          stream: prev.stream.map(item => ({ ...item, animating: false, waveDelay: undefined })),
-        }))
-      }, clearDelay)
+      // No animation cleanup needed — 'forwards' fill-mode holds the final state
+      // Removing animating flags would cause a re-render flicker
     } catch {}
   }
 
@@ -698,15 +692,7 @@ export default function Home() {
         })
         scrollToBottom()
 
-        // Remove animation flags after animation completes
-        setTimeout(() => {
-          s(prev => ({
-            ...prev,
-            stream: prev.stream.map(item =>
-              aiItems.some(ai => ai.id === item.id) ? { ...item, animating: false } : item
-            ),
-          }))
-        }, 800)
+        // No animation cleanup needed — 'forwards' fill-mode holds the final state
       } else {
         // No AI responses, still update entry metadata
         s(prev => ({
@@ -943,11 +929,12 @@ export default function Home() {
       <div id="canvas">
         <div id="stream">
           {state.stream.map((item, i) => {
-            // For wave-in: start hidden via inline style so there's zero flash before animation starts
+            // Wave-in items: animation starts from opacity:0 (in keyframes)
+            // and forwards fill-mode holds at opacity:1 — no cleanup needed, no flicker
             const waveStyle = item.animating && item.waveDelay != null
-              ? { animationDelay: `${item.waveDelay}ms`, opacity: 0 } as React.CSSProperties
+              ? { animationDelay: `${item.waveDelay}ms` } as React.CSSProperties
               : item.animating
-              ? { animationDelay: `${Math.min(i * 40, 600)}ms`, opacity: 0 } as React.CSSProperties
+              ? { animationDelay: `${Math.min(i * 40, 600)}ms` } as React.CSSProperties
               : {}
 
             const exitStyle = item.exiting
