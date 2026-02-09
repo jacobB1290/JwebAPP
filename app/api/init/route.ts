@@ -8,8 +8,9 @@ export const dynamic = 'force-dynamic'
 export async function GET(request: NextRequest) {
   if (!validateAuth(request)) return authError()
 
-  // Read model from query param (optional — client may send it)
+  // Read model and timezone from query params
   const model = request.nextUrl.searchParams.get('model') || undefined
+  const tz = request.nextUrl.searchParams.get('tz') || 'America/Boise'
 
   try {
     // Load context memo
@@ -31,8 +32,15 @@ export async function GET(request: NextRequest) {
       .from('entries')
       .select('*', { count: 'exact', head: true })
 
-    // Time of day (use UTC, Vercel will serve from edge)
-    const hour = new Date().getUTCHours()
+    // Time of day — use the user's actual timezone
+    let hour: number
+    try {
+      const formatter = new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: tz })
+      hour = parseInt(formatter.format(new Date()), 10)
+    } catch {
+      // Fallback if timezone string is invalid
+      hour = new Date().getUTCHours()
+    }
     let timeOfDay = 'morning'
     if (hour >= 12 && hour < 17) timeOfDay = 'afternoon'
     else if (hour >= 17 && hour < 21) timeOfDay = 'evening'

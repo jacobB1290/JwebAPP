@@ -52,19 +52,25 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
   const [pw, setPw] = useState('')
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
+  const [showPw, setShowPw] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  useEffect(() => { inputRef.current?.focus() }, [])
+  useEffect(() => {
+    // Slight delay so Apple autofill has time to populate
+    setTimeout(() => inputRef.current?.focus(), 100)
+  }, [])
 
-  const submit = async () => {
-    if (!pw.trim()) return
+  const submit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault()
+    const password = inputRef.current?.value || pw
+    if (!password.trim()) return
     setLoading(true)
     setErr('')
     try {
       const res = await fetch('/api/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: pw }),
+        body: JSON.stringify({ password }),
       })
       if (res.ok) onLogin()
       else setErr('Wrong password')
@@ -76,20 +82,47 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
     <div className="login-screen">
       <div className="login-content">
         <div className="login-icon">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
             <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
           </svg>
         </div>
         <h1 className="login-title">Smart Notebook</h1>
         <p className="login-sub">Your personal space</p>
-        <div className="login-form">
-          <input ref={inputRef} type="password" className="login-input" placeholder="Password" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === 'Enter' && submit()} disabled={loading} />
-          <button className="login-btn" onClick={submit} disabled={loading}>
-            {loading ? <svg className="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+
+        {/* Form element with proper autocomplete for password managers & Apple autofill */}
+        <form className="login-form" onSubmit={submit} autoComplete="on" method="post" action="">
+          {/* Hidden username field — Apple/Safari autofill requires a username field to offer saved passwords */}
+          <input type="text" name="username" autoComplete="username" defaultValue="notebook" style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} tabIndex={-1} aria-hidden="true" />
+
+          <div className="login-input-wrap">
+            <input
+              ref={inputRef}
+              type={showPw ? 'text' : 'password'}
+              name="password"
+              autoComplete="current-password"
+              className="login-input"
+              placeholder="Password"
+              value={pw}
+              onChange={e => setPw(e.target.value)}
+              disabled={loading}
+              enterKeyHint="go"
+              id="password"
+            />
+            <button type="button" className="login-eye" onClick={() => setShowPw(!showPw)} tabIndex={-1} aria-label={showPw ? 'Hide password' : 'Show password'}>
+              {showPw
+                ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
+                : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>}
+            </button>
+          </div>
+
+          <button type="submit" className="login-btn" disabled={loading}>
+            {loading
+              ? <svg className="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
               : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>}
           </button>
-        </div>
+        </form>
+
         {err && <p className="login-err">{err}</p>}
       </div>
     </div>
@@ -289,7 +322,8 @@ export default function Home() {
 
   const checkAuth = async () => {
     try {
-      const res = await fetch('/api/init')
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Boise'
+      const res = await fetch(`/api/init?tz=${encodeURIComponent(tz)}`)
       if (res.ok) {
         const data = await res.json()
         s({ authed: true, loading: false, greeting: data.greeting || 'Write something.', recentEntryId: data.recentEntryId, recentEntryTopic: data.recentEntryTopic })
@@ -883,18 +917,41 @@ body {
 
 /* ═══ Login ═══ */
 .login-screen { min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--bg); padding: 24px; }
-.login-content { display: flex; flex-direction: column; align-items: center; width: 100%; max-width: 340px; }
-.login-icon { color: var(--accent); margin-bottom: 20px; opacity: 0; animation: fadeUp 0.7s ease 0.2s forwards; }
-.login-title { font-size: 1.5rem; font-weight: 300; color: var(--text); margin-bottom: 6px; opacity: 0; animation: fadeUp 0.7s ease 0.35s forwards; }
-.login-sub { font-family: 'DM Sans', sans-serif; font-size: 0.88rem; color: var(--text-muted); margin-bottom: 32px; opacity: 0; animation: fadeUp 0.6s ease 0.5s forwards; }
-.login-form { display: flex; gap: 8px; width: 100%; opacity: 0; animation: fadeUp 0.6s ease 0.65s forwards; }
-.login-input { flex: 1; border: 1px solid var(--input-border); border-radius: 14px; padding: 14px 18px; font-family: 'DM Sans', sans-serif; font-size: 16px; background: var(--input-bg); color: var(--text); outline: none; transition: border-color 0.2s, box-shadow 0.2s; }
-.login-input:focus { border-color: var(--accent-light); box-shadow: 0 0 0 3px rgba(196,119,90,0.08); }
-.login-btn { width: 52px; height: 52px; border-radius: 14px; border: none; background: var(--accent); color: white; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform 0.15s; flex-shrink: 0; }
+.login-content { display: flex; flex-direction: column; align-items: center; width: 100%; max-width: 360px; }
+.login-icon { color: var(--accent); margin-bottom: 24px; opacity: 0; animation: fadeUp 0.7s ease 0.2s forwards; }
+.login-title { font-size: 1.6rem; font-weight: 300; color: var(--text); margin-bottom: 6px; letter-spacing: -0.01em; opacity: 0; animation: fadeUp 0.7s ease 0.35s forwards; }
+.login-sub { font-family: 'DM Sans', sans-serif; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 36px; opacity: 0; animation: fadeUp 0.6s ease 0.5s forwards; }
+.login-form { display: flex; gap: 10px; width: 100%; opacity: 0; animation: fadeUp 0.6s ease 0.65s forwards; position: relative; }
+.login-input-wrap { flex: 1; position: relative; display: flex; align-items: center; }
+.login-input {
+  width: 100%; border: 1px solid var(--input-border); border-radius: 14px; padding: 15px 44px 15px 18px;
+  font-family: 'DM Sans', sans-serif; font-size: 16px; background: var(--input-bg); color: var(--text);
+  outline: none; transition: border-color 0.2s, box-shadow 0.2s;
+  /* 16px font-size prevents iOS zoom on focus */
+}
+.login-input:focus { border-color: var(--accent-light); box-shadow: 0 0 0 3px rgba(196,119,90,0.1); }
+.login-input::placeholder { color: var(--text-light); }
+.login-eye {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; cursor: pointer; color: var(--text-light);
+  padding: 8px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  transition: color 0.15s;
+}
+.login-eye:hover { color: var(--text-muted); }
+.login-btn {
+  width: 54px; height: 54px; border-radius: 14px; border: none;
+  background: var(--accent); color: white; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform 0.15s, opacity 0.15s; flex-shrink: 0;
+}
 .login-btn:hover { transform: scale(1.04); }
 .login-btn:active { transform: scale(0.96); }
-.login-btn:disabled { opacity: 0.5; }
-.login-err { color: var(--error-bg); font-size: 0.82rem; margin-top: 14px; font-family: 'DM Sans', sans-serif; }
+.login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.login-err {
+  color: var(--error-bg); font-size: 0.8rem; margin-top: 16px;
+  font-family: 'DM Sans', sans-serif; text-align: center;
+  animation: fadeUp 0.3s ease;
+}
 
 /* ═══ Greeting ═══ */
 #greeting-screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 50; background: var(--bg); padding: 24px; transition: opacity 0.7s ease, transform 0.7s ease; cursor: text; }
