@@ -160,8 +160,8 @@ timestamp: ${new Date().toISOString()}`
       savedResponses.push({ ...resp, id: aiMsg?.id })
     }
 
-    // ─── Save tool call output ───
-    if (llmResponse.tool_call && savedResponses.length > 0) {
+    // ─── Save tool call output (skip load_entry since it's a frontend-only action) ───
+    if (llmResponse.tool_call && llmResponse.tool_call.type !== 'load_entry' && savedResponses.length > 0) {
       const lastAi = savedResponses[savedResponses.length - 1]
       if (lastAi?.id) {
         await supabase.from('tool_outputs').insert({

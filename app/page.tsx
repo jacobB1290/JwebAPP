@@ -88,7 +88,7 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
 // TOOL RENDERERS
 // ═══════════════════════════════════════════
 
-function ToolRender({ toolCall, messageId }: { toolCall: any; messageId?: string }) {
+function ToolRender({ toolCall, messageId, onLoadEntry }: { toolCall: any; messageId?: string; onLoadEntry?: (id: string) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const chartRef = useRef<any>(null)
   const data = toolCall.data || {}
@@ -109,6 +109,9 @@ function ToolRender({ toolCall, messageId }: { toolCall: any; messageId?: string
 
   const toggleCheck = async (idx: number) => { if (!messageId) return; try { await fetch('/api/checklist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messageId, itemIndex: idx }) }) } catch {} }
 
+  // load_entry tool is handled by the parent (auto-loads the entry) — don't render anything for it
+  if (toolCall.type === 'load_entry') return null
+
   return (
     <div className="tool-box">
       {toolCall.title && <div className="tool-head">{toolCall.title}</div>}
@@ -117,7 +120,7 @@ function ToolRender({ toolCall, messageId }: { toolCall: any; messageId?: string
       {toolCall.type === 'checklist' && <ChecklistTool items={data.items || []} onToggle={toggleCheck} />}
       {toolCall.type === 'prompt_card' && <div className="tool-prompt">{data.prompt}</div>}
       {toolCall.type === 'tracker' && (<div className="tool-tracker"><div className="tr-metric">{data.metric}</div>{(data.values || []).map((v: any, i: number) => <div key={i} className="tr-pt"><span className="tr-val">{v.value}</span><span className="tr-unit">{data.unit || ''}</span><span className="tr-date">{v.date || ''}</span></div>)}</div>)}
-      {toolCall.type === 'link_card' && (<div className="tool-link-card"><div style={{ fontSize: '0.85rem' }}>{data.title || 'Past Entry'}</div><div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 2 }}>{data.date || ''}</div></div>)}
+      {toolCall.type === 'link_card' && (<div className="tool-link-card" onClick={() => data.entry_id && onLoadEntry?.(data.entry_id)} style={{ cursor: data.entry_id ? 'pointer' : 'default' }}><div style={{ fontSize: '0.85rem' }}>{data.title || 'Past Entry'}</div><div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 2 }}>{data.date || ''}</div></div>)}
       {toolCall.type === 'calendar_view' && (<div className="tool-calendar">{(data.events || []).map((ev: any, i: number) => <div key={i} className="cal-event"><span className="cal-date">{ev.date}</span><span className="cal-title">{ev.title}</span></div>)}</div>)}
     </div>
   )
@@ -425,6 +428,11 @@ export default function Home() {
 
       lastSentRef.current = allTextRef.current
       if (aiItems.length > 0) scrollToBottom()
+
+      // ─── Handle load_entry tool: auto-load past entry into view ───
+      if (data.toolCall?.type === 'load_entry' && data.toolCall?.data?.entry_id) {
+        setTimeout(() => loadEntry(data.toolCall.data.entry_id), 300)
+      }
     } catch {
       s({ busy: false, error: 'Network error — check your connection' })
     }
@@ -528,7 +536,7 @@ export default function Home() {
                   <div className="anno-body">
                     {item.content && <div className="anno-text">{item.content}</div>}
                     {item.linked_entry_id && <span className="anno-link" onClick={() => loadEntry(item.linked_entry_id!)}>see related entry</span>}
-                    {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} />}
+                    {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={loadEntry} />}
                   </div>
                 </div>
               )
@@ -537,7 +545,7 @@ export default function Home() {
             return (
               <div key={item.id || i} className="si-conv" onClick={e => e.stopPropagation()}>
                 <div className="conv-text">{item.content}</div>
-                {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} />}
+                {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={loadEntry} />}
               </div>
             )
           })}
