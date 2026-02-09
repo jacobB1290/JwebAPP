@@ -194,11 +194,15 @@ timestamp: ${new Date().toISOString()}`
     })
   } catch (err: any) {
     console.error('Message error:', err?.message || err)
-    return NextResponse.json(
-      { error: err?.message?.includes('401') 
-        ? 'OpenAI API key is invalid. Please check your configuration.' 
-        : `AI failed to respond: ${err?.message || 'Unknown error'}` },
-      { status: 500 }
-    )
+    const msg = err?.message || ''
+    let userError = 'AI couldn\u2019t respond right now. Your writing is saved \u2014 try again in a moment.'
+    if (msg.includes('401')) {
+      userError = 'OpenAI API key is invalid. Check your configuration.'
+    } else if (msg.includes('429')) {
+      userError = 'Rate limit hit \u2014 too many requests. Wait a minute and try again.'
+    } else if (msg.includes('500') || msg.includes('503')) {
+      userError = 'OpenAI is having issues. Your writing is safe \u2014 try again shortly.'
+    }
+    return NextResponse.json({ error: userError }, { status: 500 })
   }
 }

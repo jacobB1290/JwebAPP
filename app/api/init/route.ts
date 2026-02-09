@@ -35,8 +35,16 @@ export async function GET(request: NextRequest) {
     else if (hour >= 17 && hour < 21) timeOfDay = 'evening'
     else if (hour >= 21 || hour < 5) timeOfDay = 'night'
 
-    // Generate greeting via LLM
-    const greetingContext = `Time of day: ${timeOfDay}
+    // Find most recent entry for fallback
+    const mostRecent = (recentEntries || [])[0] || null
+
+    // ─── Generate greeting via LLM (non-blocking — fallback if it fails) ───
+    let greeting = ''
+    let recentEntryId: string | null = null
+    let recentEntryTopic: string | null = null
+
+    try {
+      const greetingContext = `Time of day: ${timeOfDay}
 Total entries: ${entryCount || 0}
 Context memo: ${memo?.summary_text || '(empty — this is likely a first-time user)'}
 Recent entries: ${JSON.stringify((recentEntries || []).slice(0, 5).map(e => ({
@@ -47,20 +55,43 @@ Recent entries: ${JSON.stringify((recentEntries || []).slice(0, 5).map(e => ({
   id: e.id,
 })))}`
 
-    const result = await callLLM(GREETING_PROMPT, greetingContext)
+      const result = await callLLM(GREETING_PROMPT, greetingContext)
+      greeting = result.greeting || ''
+      recentEntryId = result.recent_entry_id || null
+      recentEntryTopic = result.recent_entry_topic || null
+    } catch (llmErr: any) {
+      console.error('Greeting LLM failed (non-fatal):', llmErr?.message || llmErr)
+      // Fallback: build a simple greeting without LLM
+      const greetings: Record<string, string> = {
+        morning: 'Morning.',
+        afternoon: 'Afternoon.',
+        evening: 'Evening.',
+        night: 'Late one.',
+      }
+      greeting = greetings[timeOfDay] || 'Hey.'
+      if (mostRecent?.title) {
+        greeting += ` You were last writing "${mostRecent.title}."`
+        recentEntryId = mostRecent.id
+        recentEntryTopic = mostRecent.title
+      }
+    }
 
     return NextResponse.json({
-      greeting: result.greeting || 'Hello. This is your space.',
-      recentEntryId: result.recent_entry_id || null,
-      recentEntryTopic: result.recent_entry_topic || null,
+      greeting: greeting || 'This is your space. Write.',
+      recentEntryId,
+      recentEntryTopic,
       contextMemo: memo?.summary_text || '',
       entryCount: entryCount || 0,
     })
   } catch (err: any) {
+    // Only Supabase failures reach here — still let the user in
     console.error('Init error:', err?.message || err)
-    return NextResponse.json(
-      { error: 'Failed to initialize. Check your OpenAI API key.' },
-      { status: 500 }
-    )
+    return NextResponse.json({
+      greeting: 'Hey. Write something.',
+      recentEntryId: null,
+      recentEntryTopic: null,
+      contextMemo: '',
+      entryCount: 0,
+    })
   }
 }

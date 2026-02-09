@@ -256,12 +256,12 @@ export default function Home() {
       const res = await fetch('/api/init')
       if (res.ok) {
         const data = await res.json()
-        s({ authed: true, loading: false, greeting: data.greeting, recentEntryId: data.recentEntryId, recentEntryTopic: data.recentEntryTopic })
+        s({ authed: true, loading: false, greeting: data.greeting || 'Write something.', recentEntryId: data.recentEntryId, recentEntryTopic: data.recentEntryTopic })
       } else if (res.status === 401) {
         s({ authed: false, loading: false })
       } else {
-        const data = await res.json().catch(() => ({}))
-        s({ authed: false, loading: false, error: data.error || 'Failed to connect' })
+        // Non-401 error — still let user in with a fallback greeting
+        s({ authed: true, loading: false, greeting: 'Hey. Write something.' })
       }
     } catch { s({ authed: false, loading: false, error: 'Failed to connect' }) }
   }
