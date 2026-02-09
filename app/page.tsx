@@ -53,10 +53,10 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
   const [showPw, setShowPw] = useState(false)
+  const [shake, setShake] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    // Slight delay so Apple autofill has time to populate
     setTimeout(() => inputRef.current?.focus(), 100)
   }, [])
 
@@ -73,28 +73,40 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
         body: JSON.stringify({ password }),
       })
       if (res.ok) onLogin()
-      else setErr('Wrong password')
-    } catch { setErr('Connection error') }
+      else {
+        setErr('Wrong password')
+        setShake(true)
+        setTimeout(() => setShake(false), 500)
+        inputRef.current?.select()
+      }
+    } catch {
+      setErr('Connection error')
+      setShake(true)
+      setTimeout(() => setShake(false), 500)
+    }
     setLoading(false)
   }
 
   return (
     <div className="login-screen">
-      <div className="login-content">
-        <div className="login-icon">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
-            <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+      {/* Subtle background texture */}
+      <div className="login-bg-grain" />
+
+      <div className="login-card">
+        {/* Lock icon */}
+        <div className="login-lock">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
           </svg>
         </div>
-        <h1 className="login-title">Smart Notebook</h1>
-        <p className="login-sub">Your personal space</p>
 
-        {/* Form element with proper autocomplete for password managers & Apple autofill */}
-        <form className="login-form" onSubmit={submit} autoComplete="on" method="post" action="">
-          {/* Hidden username field — Apple/Safari autofill requires a username field to offer saved passwords */}
+        <h1 className="login-title">Smart Notebook</h1>
+
+        <form className={`login-form ${shake ? 'shake' : ''}`} onSubmit={submit} autoComplete="on" method="post" action="">
           <input type="text" name="username" autoComplete="username" defaultValue="notebook" style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} tabIndex={-1} aria-hidden="true" />
 
+          <label className="login-label" htmlFor="password">Password</label>
           <div className="login-input-wrap">
             <input
               ref={inputRef}
@@ -102,7 +114,7 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
               name="password"
               autoComplete="current-password"
               className="login-input"
-              placeholder="Password"
+              placeholder="Enter your password"
               value={pw}
               onChange={e => setPw(e.target.value)}
               disabled={loading}
@@ -116,14 +128,14 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
             </button>
           </div>
 
+          {err && <p className="login-err">{err}</p>}
+
           <button type="submit" className="login-btn" disabled={loading}>
             {loading
-              ? <svg className="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
-              : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>}
+              ? <><svg className="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg><span>Signing in...</span></>
+              : <span>Unlock</span>}
           </button>
         </form>
-
-        {err && <p className="login-err">{err}</p>}
       </div>
     </div>
   )
@@ -720,10 +732,20 @@ export default function Home() {
 
   // ─── Render ───
   if (state.loading) {
-    return <div className="login-screen"><div className="thinking" style={{ justifyContent: 'center' }}><span className="t-dot" /><span className="t-dot" /><span className="t-dot" /></div></div>
+    return (
+      <>
+        <div className="login-screen"><div className="thinking" style={{ justifyContent: 'center' }}><span className="t-dot" /><span className="t-dot" /><span className="t-dot" /></div></div>
+        <style jsx global>{styles}</style>
+      </>
+    )
   }
 
-  if (!state.authed) return <LoginScreen onLogin={onLogin} />
+  if (!state.authed) return (
+    <>
+      <LoginScreen onLogin={onLogin} />
+      <style jsx global>{styles}</style>
+    </>
+  )
 
   return (
     <div id="app" onClick={focusInput}>
@@ -916,42 +938,82 @@ body {
 @keyframes spinAnim { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 /* ═══ Login ═══ */
-.login-screen { min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--bg); padding: 24px; }
-.login-content { display: flex; flex-direction: column; align-items: center; width: 100%; max-width: 360px; }
-.login-icon { color: var(--accent); margin-bottom: 24px; opacity: 0; animation: fadeUp 0.7s ease 0.2s forwards; }
-.login-title { font-size: 1.6rem; font-weight: 300; color: var(--text); margin-bottom: 6px; letter-spacing: -0.01em; opacity: 0; animation: fadeUp 0.7s ease 0.35s forwards; }
-.login-sub { font-family: 'DM Sans', sans-serif; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 36px; opacity: 0; animation: fadeUp 0.6s ease 0.5s forwards; }
-.login-form { display: flex; gap: 10px; width: 100%; opacity: 0; animation: fadeUp 0.6s ease 0.65s forwards; position: relative; }
-.login-input-wrap { flex: 1; position: relative; display: flex; align-items: center; }
-.login-input {
-  width: 100%; border: 1px solid var(--input-border); border-radius: 14px; padding: 15px 44px 15px 18px;
-  font-family: 'DM Sans', sans-serif; font-size: 16px; background: var(--input-bg); color: var(--text);
-  outline: none; transition: border-color 0.2s, box-shadow 0.2s;
-  /* 16px font-size prevents iOS zoom on focus */
+.login-screen {
+  min-height: 100dvh; display: flex; align-items: center; justify-content: center;
+  background: var(--bg); padding: 24px; position: relative; overflow: hidden;
 }
-.login-input:focus { border-color: var(--accent-light); box-shadow: 0 0 0 3px rgba(196,119,90,0.1); }
+.login-bg-grain {
+  position: absolute; inset: 0; opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  pointer-events: none;
+}
+.login-card {
+  width: 100%; max-width: 380px; display: flex; flex-direction: column; align-items: center;
+  background: var(--input-bg); border: 1px solid var(--divider); border-radius: 24px;
+  padding: 48px 36px 40px; box-shadow: 0 8px 40px var(--shadow), 0 1px 3px var(--shadow);
+  opacity: 0; animation: loginCardIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards;
+}
+@keyframes loginCardIn {
+  from { opacity: 0; transform: translateY(16px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.login-lock {
+  width: 56px; height: 56px; border-radius: 16px; background: var(--accent-bg);
+  border: 1px solid var(--accent-light); display: flex; align-items: center; justify-content: center;
+  color: var(--accent); margin-bottom: 24px;
+}
+.login-title {
+  font-size: 1.4rem; font-weight: 400; color: var(--text); margin-bottom: 32px;
+  letter-spacing: -0.01em;
+}
+.login-form {
+  display: flex; flex-direction: column; gap: 0; width: 100%; position: relative;
+}
+.login-form.shake { animation: shakeForm 0.4s ease; }
+@keyframes shakeForm {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-8px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(5px); }
+}
+.login-label {
+  font-family: 'DM Sans', sans-serif; font-size: 0.72rem; font-weight: 500;
+  color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em;
+  margin-bottom: 8px; padding-left: 2px;
+}
+.login-input-wrap { position: relative; display: flex; align-items: center; margin-bottom: 12px; }
+.login-input {
+  width: 100%; border: 1px solid var(--input-border); border-radius: 14px;
+  padding: 15px 44px 15px 16px; font-family: 'DM Sans', sans-serif; font-size: 16px;
+  background: var(--bg); color: var(--text); outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.login-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(196,119,90,0.1); }
 .login-input::placeholder { color: var(--text-light); }
 .login-eye {
-  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
   background: none; border: none; cursor: pointer; color: var(--text-light);
   padding: 8px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
   transition: color 0.15s;
 }
 .login-eye:hover { color: var(--text-muted); }
-.login-btn {
-  width: 54px; height: 54px; border-radius: 14px; border: none;
-  background: var(--accent); color: white; cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  transition: transform 0.15s, opacity 0.15s; flex-shrink: 0;
-}
-.login-btn:hover { transform: scale(1.04); }
-.login-btn:active { transform: scale(0.96); }
-.login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .login-err {
-  color: var(--error-bg); font-size: 0.8rem; margin-top: 16px;
-  font-family: 'DM Sans', sans-serif; text-align: center;
-  animation: fadeUp 0.3s ease;
+  color: var(--error-bg); font-size: 0.78rem; margin-bottom: 12px;
+  font-family: 'DM Sans', sans-serif; text-align: center; padding: 8px 12px;
+  background: rgba(192,57,43,0.06); border-radius: 10px;
+  animation: fadeUp 0.2s ease;
 }
+.login-btn {
+  width: 100%; padding: 14px; border-radius: 14px; border: none;
+  background: var(--accent); color: white; cursor: pointer;
+  font-family: 'DM Sans', sans-serif; font-size: 0.88rem; font-weight: 500;
+  letter-spacing: 0.02em; display: flex; align-items: center; justify-content: center; gap: 8px;
+  transition: transform 0.15s, opacity 0.15s, background 0.2s;
+}
+.login-btn:hover { background: #b86a4f; transform: translateY(-1px); }
+.login-btn:active { transform: translateY(0) scale(0.99); }
+.login-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 
 /* ═══ Greeting ═══ */
 #greeting-screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 50; background: var(--bg); padding: 24px; transition: opacity 0.7s ease, transform 0.7s ease; cursor: text; }
