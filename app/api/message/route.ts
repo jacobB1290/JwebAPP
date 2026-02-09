@@ -196,8 +196,10 @@ timestamp: ${new Date().toISOString()}`
     console.error('Message error:', err?.message || err)
     const msg = err?.message || ''
     let userError = 'AI couldn\u2019t respond right now. Your writing is saved \u2014 try again in a moment.'
-    if (msg.includes('401')) {
+    if (msg.includes('401') || msg.includes('invalid')) {
       userError = 'OpenAI API key is invalid. Check your configuration.'
+    } else if (msg.includes('insufficient_quota') || msg.includes('exceeded your current quota')) {
+      userError = 'OpenAI account out of credits. Add funds at platform.openai.com/settings/organization/billing'
     } else if (msg.includes('429')) {
       userError = 'Rate limit hit \u2014 too many requests. Wait a minute and try again.'
     } else if (msg.includes('500') || msg.includes('503')) {
