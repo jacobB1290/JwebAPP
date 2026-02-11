@@ -6,10 +6,20 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 // TYPES
 // ═══════════════════════════════════════════
 
+interface ImageAttachment {
+  id: string
+  url: string
+  width: number       // percentage of container (15–100)
+  float: 'none' | 'left' | 'right'
+  uploading?: boolean  // true while server upload in progress
+  naturalW?: number    // intrinsic pixel width for aspect ratio
+  naturalH?: number    // intrinsic pixel height for aspect ratio
+}
+
 interface StreamItem {
   id?: string
   uid: string // unique client-side ID for tracking
-  type: 'writing' | 'ai-annotation' | 'ai-conversational' | 'merged-header' | 'image'
+  type: 'writing' | 'ai-annotation' | 'ai-conversational' | 'merged-header'
   content: string
   tone?: string
   linked_entry_id?: string | null
@@ -25,10 +35,8 @@ interface StreamItem {
   originalContent?: string
   editedSinceProcess?: boolean
   processing?: boolean
-  // ─── Image ───
-  imageUrl?: string
-  imageWidth?: number  // percentage of container width (10-100)
-  imageFloat?: 'none' | 'left' | 'right'
+  // ─── Images attached to writing blocks ───
+  images?: ImageAttachment[]
 }
 
 interface ModelOption {
@@ -401,171 +409,198 @@ function EntryCard({ entry, onClick, onDelete, confirming }: { entry: any; onCli
 }
 
 // ═══════════════════════════════════════════
-// INLINE IMAGE — resizable, floatable
+// INLINE IMAGE — resizable, floatable, lives INSIDE writing blocks
 // ═══════════════════════════════════════════
 
-function InlineImage({ item, onResize, onChangeFloat, onRemove }: { 
-  item: StreamItem
+function InlineImage({ img, onResize, onChangeFloat, onRemove }: {
+  img: ImageAttachment
   onResize: (width: number) => void
   onChangeFloat: (float: 'none' | 'left' | 'right') => void
   onRemove: () => void
 }) {
-  const [showControls, setShowControls] = useState(false)
+  const [hovered, setHovered] = useState(false)
   const [resizing, setResizing] = useState(false)
-  const imgRef = useRef<HTMLDivElement>(null)
+  const [loaded, setLoaded] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
   const startXRef = useRef(0)
   const startWidthRef = useRef(0)
 
-  const width = item.imageWidth || 50
-  const float = item.imageFloat || 'none'
+  const width = img.width || 50
+  const float = img.float || 'none'
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
+  // Resize via drag — smooth with requestAnimationFrame
+  const startResize = (clientX: number) => {
     setResizing(true)
-    startXRef.current = e.clientX
+    startXRef.current = clientX
     startWidthRef.current = width
 
-    const handleMouseMove = (e: MouseEvent) => {
-      const containerWidth = imgRef.current?.parentElement?.offsetWidth || 680
-      const deltaX = e.clientX - startXRef.current
-      const deltaPercent = (deltaX / containerWidth) * 100
-      const newWidth = Math.max(15, Math.min(100, startWidthRef.current + deltaPercent))
-      onResize(Math.round(newWidth))
+    let raf: number | null = null
+    const onMove = (x: number) => {
+      if (raf) cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        const parentW = containerRef.current?.parentElement?.offsetWidth || 680
+        const delta = ((x - startXRef.current) / parentW) * 100
+        const next = Math.round(Math.max(15, Math.min(100, startWidthRef.current + delta)))
+        onResize(next)
+      })
     }
 
-    const handleMouseUp = () => {
+    const handleMouseMove = (e: MouseEvent) => onMove(e.clientX)
+    const handleTouchMove = (e: TouchEvent) => onMove(e.touches[0].clientX)
+    const cleanup = () => {
       setResizing(false)
+      if (raf) cancelAnimationFrame(raf)
       window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup', handleMouseUp)
-    }
-
-    window.addEventListener('mousemove', handleMouseMove)
-    window.addEventListener('mouseup', handleMouseUp)
-  }
-
-  // Touch support for mobile
-  const handleTouchStart = (e: React.TouchEvent) => {
-    e.stopPropagation()
-    setResizing(true)
-    startXRef.current = e.touches[0].clientX
-    startWidthRef.current = width
-
-    const handleTouchMove = (e: TouchEvent) => {
-      const containerWidth = imgRef.current?.parentElement?.offsetWidth || 680
-      const deltaX = e.touches[0].clientX - startXRef.current
-      const deltaPercent = (deltaX / containerWidth) * 100
-      const newWidth = Math.max(15, Math.min(100, startWidthRef.current + deltaPercent))
-      onResize(Math.round(newWidth))
-    }
-
-    const handleTouchEnd = () => {
-      setResizing(false)
+      window.removeEventListener('mouseup', cleanup)
       window.removeEventListener('touchmove', handleTouchMove)
-      window.removeEventListener('touchend', handleTouchEnd)
+      window.removeEventListener('touchend', cleanup)
     }
-
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', cleanup)
     window.addEventListener('touchmove', handleTouchMove)
-    window.addEventListener('touchend', handleTouchEnd)
+    window.addEventListener('touchend', cleanup)
   }
 
-  const floatClass = float === 'left' ? 'img-float-left' : float === 'right' ? 'img-float-right' : 'img-float-none'
+  const floatClass = float === 'left' ? 'img-float-left' : float === 'right' ? 'img-float-right' : 'img-float-center'
 
   return (
     <div
-      ref={imgRef}
-      className={`si-image ${floatClass} ${resizing ? 'resizing' : ''}`}
+      ref={containerRef}
+      className={`inline-img ${floatClass} ${resizing ? 'is-resizing' : ''} ${loaded ? 'is-loaded' : ''} ${img.uploading ? 'is-uploading' : ''}`}
       style={{ width: `${width}%` }}
-      onClick={e => { e.stopPropagation(); setShowControls(!showControls) }}
-      onMouseEnter={() => setShowControls(true)}
-      onMouseLeave={() => { if (!resizing) setShowControls(false) }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { if (!resizing) setHovered(false) }}
+      onClick={e => e.stopPropagation()}
     >
-      <img src={item.imageUrl} alt="" draggable={false} />
-      
-      {/* Resize handle */}
-      <div
-        className="img-resize-handle"
-        onMouseDown={handleMouseDown}
-        onTouchStart={handleTouchStart}
+      {/* Upload shimmer overlay */}
+      {img.uploading && <div className="img-upload-shimmer" />}
+
+      {/* The image */}
+      <img
+        src={img.url}
+        alt=""
+        draggable={false}
+        onLoad={() => setLoaded(true)}
+        className={`inline-img-el ${loaded ? 'revealed' : ''}`}
       />
 
-      {/* Controls overlay */}
-      <div className={`img-controls ${showControls ? 'visible' : ''}`}>
+      {/* Resize handle — right edge */}
+      <div
+        className="img-resize"
+        onMouseDown={e => { e.preventDefault(); e.stopPropagation(); startResize(e.clientX) }}
+        onTouchStart={e => { e.stopPropagation(); startResize(e.touches[0].clientX) }}
+      >
+        <div className="img-resize-grip" />
+      </div>
+
+      {/* Floating toolbar — appears on hover */}
+      <div className={`img-toolbar ${hovered || resizing ? 'visible' : ''}`}>
         <button
-          className={`img-ctrl-btn ${float === 'left' ? 'active' : ''}`}
+          className={`img-tb-btn ${float === 'left' ? 'active' : ''}`}
           onClick={e => { e.stopPropagation(); onChangeFloat(float === 'left' ? 'none' : 'left') }}
-          title="Float left (text wraps right)"
+          title="Float left"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="8" height="8" rx="1" /><line x1="14" y1="4" x2="22" y2="4" /><line x1="14" y1="8" x2="22" y2="8" /><line x1="2" y1="16" x2="22" y2="16" /><line x1="2" y1="20" x2="22" y2="20" /></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="8" height="8" rx="1"/><line x1="14" y1="4" x2="22" y2="4"/><line x1="14" y1="8" x2="22" y2="8"/><line x1="2" y1="16" x2="22" y2="16"/><line x1="2" y1="20" x2="22" y2="20"/></svg>
         </button>
         <button
-          className={`img-ctrl-btn ${float === 'none' ? 'active' : ''}`}
+          className={`img-tb-btn ${float === 'none' ? 'active' : ''}`}
           onClick={e => { e.stopPropagation(); onChangeFloat('none') }}
-          title="Center (no text wrap)"
+          title="Center"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="3" width="12" height="8" rx="1" /><line x1="2" y1="16" x2="22" y2="16" /><line x1="2" y1="20" x2="22" y2="20" /></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="3" width="12" height="8" rx="1"/><line x1="2" y1="16" x2="22" y2="16"/><line x1="2" y1="20" x2="22" y2="20"/></svg>
         </button>
         <button
-          className={`img-ctrl-btn ${float === 'right' ? 'active' : ''}`}
+          className={`img-tb-btn ${float === 'right' ? 'active' : ''}`}
           onClick={e => { e.stopPropagation(); onChangeFloat(float === 'right' ? 'none' : 'right') }}
-          title="Float right (text wraps left)"
+          title="Float right"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="14" y="3" width="8" height="8" rx="1" /><line x1="2" y1="4" x2="10" y2="4" /><line x1="2" y1="8" x2="10" y2="8" /><line x1="2" y1="16" x2="22" y2="16" /><line x1="2" y1="20" x2="22" y2="20" /></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="14" y="3" width="8" height="8" rx="1"/><line x1="2" y1="4" x2="10" y2="4"/><line x1="2" y1="8" x2="10" y2="8"/><line x1="2" y1="16" x2="22" y2="16"/><line x1="2" y1="20" x2="22" y2="20"/></svg>
         </button>
-        <div className="img-ctrl-divider" />
+        <div className="img-tb-sep" />
         <button
-          className="img-ctrl-btn img-ctrl-delete"
+          className="img-tb-btn img-tb-delete"
           onClick={e => { e.stopPropagation(); onRemove() }}
-          title="Remove image"
+          title="Remove"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
         </button>
       </div>
+
+      {/* Width indicator during resize */}
+      {resizing && <div className="img-size-badge">{width}%</div>}
     </div>
   )
 }
 
 // ═══════════════════════════════════════════
-// EDITABLE WRITING BLOCK
+// EDITABLE WRITING BLOCK — with integrated image support
 // ═══════════════════════════════════════════
 
-function WritingBlock({ item, onEdit, onClick }: { item: StreamItem; onEdit: (newContent: string) => void; onClick?: (e: React.MouseEvent) => void }) {
+function WritingBlock({ item, onEdit, onClick, onImageResize, onImageFloat, onImageRemove }: {
+  item: StreamItem
+  onEdit: (newContent: string) => void
+  onClick?: (e: React.MouseEvent) => void
+  onImageResize?: (imgId: string, width: number) => void
+  onImageFloat?: (imgId: string, float: 'none' | 'left' | 'right') => void
+  onImageRemove?: (imgId: string) => void
+}) {
   const ref = useRef<HTMLDivElement>(null)
-  const [editing, setEditing] = useState(false)
-  const lastContentRef = useRef(item.content)
+  const internalContent = useRef(item.content)
+  const isComposing = useRef(false)
 
-  // Sync content from props only when not editing
+  // Only push content to DOM when it changes externally (not from user editing)
   useEffect(() => {
-    if (!editing && ref.current && ref.current.textContent !== item.content) {
-      ref.current.textContent = item.content
+    if (ref.current && item.content !== internalContent.current) {
+      // Content changed from outside (e.g. initial load, redo) — update DOM
+      internalContent.current = item.content
+      ref.current.innerText = item.content
     }
-    lastContentRef.current = item.content
-  }, [item.content, editing])
+  }, [item.content])
 
-  const handleBlur = () => {
-    setEditing(false)
-    const text = ref.current?.textContent || ''
-    if (text !== lastContentRef.current) {
-      onEdit(text)
+  // Set initial content once on mount
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.innerText = item.content
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleInput = () => {
-    if (!editing) setEditing(true)
+    if (isComposing.current) return
+    const text = ref.current?.innerText || ''
+    internalContent.current = text
+    onEdit(text)
   }
 
+  const images = item.images || []
+  const hasImages = images.length > 0
+
   return (
-    <div
-      ref={ref}
-      className="si-writing-editable"
-      contentEditable
-      suppressContentEditableWarning
-      spellCheck
-      onInput={handleInput}
-      onBlur={handleBlur}
-      onClick={onClick}
-      dangerouslySetInnerHTML={{ __html: item.content }}
-    />
+    <div className={`writing-block ${hasImages ? 'has-images' : ''}`} onClick={onClick}>
+      {/* Images float above/alongside text */}
+      {images.map(img => (
+        <InlineImage
+          key={img.id}
+          img={img}
+          onResize={w => onImageResize?.(img.id, w)}
+          onChangeFloat={f => onImageFloat?.(img.id, f)}
+          onRemove={() => onImageRemove?.(img.id)}
+        />
+      ))}
+      <div
+        ref={ref}
+        className="writing-block-text"
+        contentEditable
+        suppressContentEditableWarning
+        spellCheck
+        role="textbox"
+        onInput={handleInput}
+        onCompositionStart={() => { isComposing.current = true }}
+        onCompositionEnd={() => { isComposing.current = false; handleInput() }}
+      />
+      {/* Clear float after images */}
+      {hasImages && <div style={{ clear: 'both' }} />}
+    </div>
   )
 }
 
@@ -769,29 +804,63 @@ export default function Home() {
     processQueue()
   }
 
-  // ─── Image upload handler ───
+  // ─── Image upload handler — attaches to nearest writing block ───
   const uploadImage = async (file: File) => {
+    // Compress large images client-side before upload
+    const compressImage = (dataUrl: string, maxDim: number = 1600): Promise<string> => {
+      return new Promise(resolve => {
+        const img = new Image()
+        img.onload = () => {
+          if (img.width <= maxDim && img.height <= maxDim) { resolve(dataUrl); return }
+          const scale = Math.min(maxDim / img.width, maxDim / img.height)
+          const canvas = document.createElement('canvas')
+          canvas.width = Math.round(img.width * scale)
+          canvas.height = Math.round(img.height * scale)
+          const ctx = canvas.getContext('2d')!
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+          resolve(canvas.toDataURL('image/jpeg', 0.85))
+        }
+        img.src = dataUrl
+      })
+    }
+
     const reader = new FileReader()
     reader.onload = async () => {
-      const base64 = reader.result as string
+      const raw = reader.result as string
+      const base64 = await compressImage(raw)
+      const imgId = `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
-      // Add image to stream immediately with base64 data URL
-      const imageItem: StreamItem = {
-        uid: uid(),
-        type: 'image',
-        content: '',
-        imageUrl: base64,
-        imageWidth: 50,
-        imageFloat: 'none',
-        animating: true,
-        isNew: true,
+      const attachment: ImageAttachment = {
+        id: imgId,
+        url: base64,
+        width: 50,
+        float: 'none',
+        uploading: true,
       }
 
-      s(prev => ({
-        ...prev,
-        stream: [...prev.stream, imageItem],
-        greetingVisible: false,
-      }))
+      // Attach to last writing block, or create one
+      s(prev => {
+        const newStream = [...prev.stream]
+        const lastWritingIdx = newStream.map(i => i.type).lastIndexOf('writing')
+
+        if (lastWritingIdx >= 0) {
+          const item = { ...newStream[lastWritingIdx] }
+          item.images = [...(item.images || []), attachment]
+          newStream[lastWritingIdx] = item
+        } else {
+          // Create a new writing block to hold the image
+          newStream.push({
+            uid: uid(),
+            type: 'writing',
+            content: '',
+            originalContent: '',
+            images: [attachment],
+            animating: true,
+            isNew: true,
+          })
+        }
+        return { ...prev, stream: newStream, greetingVisible: false }
+      })
       scrollToBottom()
 
       // Upload to server in background
@@ -799,54 +868,72 @@ export default function Home() {
         const res = await fetch('/api/upload', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            image: base64,
-            filename: file.name,
-            contentType: file.type,
-          }),
+          body: JSON.stringify({ image: base64, filename: file.name, contentType: file.type }),
         })
         const data = await res.json()
-        if (data.url && data.url !== base64) {
-          // Replace base64 with server URL
-          s(prev => ({
-            ...prev,
-            stream: prev.stream.map(item =>
-              item.uid === imageItem.uid ? { ...item, imageUrl: data.url } : item
-            ),
-          }))
-        }
+        // Update with server URL and clear uploading state
+        s(prev => ({
+          ...prev,
+          stream: prev.stream.map(item => {
+            if (!item.images?.some(i => i.id === imgId)) return item
+            return {
+              ...item,
+              images: item.images!.map(i =>
+                i.id === imgId ? { ...i, url: data.url || i.url, uploading: false } : i
+              ),
+            }
+          }),
+        }))
       } catch {
-        // Keep base64 URL if upload fails — it still works
+        // Clear uploading state even on failure — base64 still works
+        s(prev => ({
+          ...prev,
+          stream: prev.stream.map(item => {
+            if (!item.images?.some(i => i.id === imgId)) return item
+            return {
+              ...item,
+              images: item.images!.map(i =>
+                i.id === imgId ? { ...i, uploading: false } : i
+              ),
+            }
+          }),
+        }))
       }
     }
     reader.readAsDataURL(file)
   }
 
-  // ─── Handle image resize ───
-  const handleImageResize = (itemUid: string, width: number) => {
+  // ─── Image manipulation handlers ───
+  const handleImageResize = (itemUid: string, imgId: string, width: number) => {
     s(prev => ({
       ...prev,
       stream: prev.stream.map(item =>
-        item.uid === itemUid ? { ...item, imageWidth: width } : item
+        item.uid === itemUid
+          ? { ...item, images: item.images?.map(i => i.id === imgId ? { ...i, width } : i) }
+          : item
       ),
     }))
   }
 
-  // ─── Handle image float change ───
-  const handleImageFloat = (itemUid: string, float: 'none' | 'left' | 'right') => {
+  const handleImageFloat = (itemUid: string, imgId: string, float: 'none' | 'left' | 'right') => {
     s(prev => ({
       ...prev,
       stream: prev.stream.map(item =>
-        item.uid === itemUid ? { ...item, imageFloat: float } : item
+        item.uid === itemUid
+          ? { ...item, images: item.images?.map(i => i.id === imgId ? { ...i, float } : i) }
+          : item
       ),
     }))
   }
 
-  // ─── Handle image remove ───
-  const handleImageRemove = (itemUid: string) => {
+  const handleImageRemove = (itemUid: string, imgId: string) => {
     s(prev => ({
       ...prev,
-      stream: prev.stream.filter(item => item.uid !== itemUid),
+      stream: prev.stream.map(item =>
+        item.uid === itemUid
+          ? { ...item, images: item.images?.filter(i => i.id !== imgId) }
+          : item
+      ),
     }))
   }
 
@@ -1358,45 +1445,33 @@ export default function Home() {
               )
             }
 
-            // Writing block — editable
+            // Writing block — editable with integrated images
             if (item.type === 'writing') {
               const hasAiResponse = state.stream.some(s => s.sourceUid === item.uid)
               const isProcessing = item.processing
 
               return (
-                <div key={item.uid} className={`si-writing-wrap ${item.exiting ? 'stream-exit' : ''} ${item.animating ? (item.waveDelay != null ? 'wave-in' : '') : ''}`} style={item.exiting ? exitStyle : waveStyle}>
+                <div key={item.uid} className={`si-writing-wrap ${isProcessing ? 'is-processing' : ''} ${item.exiting ? 'stream-exit' : ''} ${item.animating ? (item.waveDelay != null ? 'wave-in' : '') : ''}`} style={item.exiting ? exitStyle : waveStyle}>
                   <WritingBlock
                     item={item}
                     onEdit={(newContent) => handleWritingEdit(item.uid, newContent)}
                     onClick={e => e.stopPropagation()}
+                    onImageResize={(imgId, w) => handleImageResize(item.uid, imgId, w)}
+                    onImageFloat={(imgId, f) => handleImageFloat(item.uid, imgId, f)}
+                    onImageRemove={(imgId) => handleImageRemove(item.uid, imgId)}
                   />
                   {isProcessing && (
                     <div className="writing-processing">
-                      <div className="processing-line" />
+                      <div className="processing-glow" />
                     </div>
                   )}
                 </div>
               )
             }
 
-            // Image block
-            if (item.type === 'image') {
-              const imgAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'si-inserting' : 'wave-in') : ''
-              return (
-                <div key={item.uid} className={`si-image-wrap ${imgAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
-                  <InlineImage
-                    item={item}
-                    onResize={(w) => handleImageResize(item.uid, w)}
-                    onChangeFloat={(f) => handleImageFloat(item.uid, f)}
-                    onRemove={() => handleImageRemove(item.uid)}
-                  />
-                </div>
-              )
-            }
-
             // AI Annotation
             if (item.type === 'ai-annotation') {
-              const aiAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'si-inserting' : 'wave-in') : ''
+              const aiAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'ai-reveal' : 'wave-in') : ''
               const sourceEdited = item.editedSinceProcess
               return (
                 <div key={item.uid} className={`si-annotation ${aiAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
@@ -1419,7 +1494,7 @@ export default function Home() {
             }
 
             // AI Conversational
-            const convAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'si-inserting' : 'wave-in') : ''
+            const convAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'ai-reveal' : 'wave-in') : ''
             const sourceEdited = item.editedSinceProcess
             return (
               <div key={item.uid} className={`si-conv ${convAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
@@ -1675,65 +1750,102 @@ body {
 
 /* ═══ Canvas ═══ */
 #canvas { max-width: 680px; width: 100%; margin: 0 auto; padding: 64px 24px 120px; min-height: 100dvh; }
-#stream { display: flex; flex-direction: column; gap: 0; }
+#stream { display: flex; flex-direction: column; gap: 2px; }
 #stream.stream-fade { animation: streamFadeIn ease both; }
 @keyframes streamFadeIn { 0% { opacity: 0; } 100% { opacity: 1; } }
 
 /* ═══ Stream Items ═══ */
 
 /* Writing block wrapper */
-.si-writing-wrap { position: relative; }
+.si-writing-wrap {
+  position: relative;
+  border-radius: 6px;
+  transition: background 0.4s ease, box-shadow 0.4s ease;
+}
 .si-writing-wrap.wave-in { animation: waterfallIn 0.4s ease both; }
 .si-writing-wrap.stream-exit { animation: streamExit 0.35s ease forwards; }
 
-/* Editable writing block */
-.si-writing-editable {
-  padding: 0 0 4px; white-space: pre-wrap; word-break: break-word;
-  outline: none; border: none; min-height: 1.8em;
-  border-radius: 4px; margin: 0 -4px; padding-left: 4px; padding-right: 4px;
-  transition: background 0.25s ease;
-  caret-color: var(--accent);
+/* Processing state — subtle ambient glow */
+.si-writing-wrap.is-processing {
+  background: linear-gradient(135deg, var(--accent-bg) 0%, transparent 60%);
 }
-.si-writing-editable:focus {
-  background: var(--bg-secondary);
+.si-writing-wrap.is-processing::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 8px; bottom: 8px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: 0;
+  animation: processingEdgePulse 2s ease-in-out infinite;
+}
+@keyframes processingEdgePulse {
+  0%, 100% { opacity: 0; transform: scaleY(0.4); }
+  50% { opacity: 0.5; transform: scaleY(1); }
 }
 
-/* Processing indicator — animated line under writing block */
+/* Editable writing block container */
+.writing-block {
+  position: relative;
+  padding: 2px 0 4px;
+  min-height: 1.6em;
+}
+.writing-block.has-images { overflow: hidden; }
+
+.writing-block-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  outline: none;
+  border: none;
+  border-radius: 4px;
+  margin: 0 -6px;
+  padding: 2px 6px;
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+  caret-color: var(--accent);
+  min-height: 1.2em;
+}
+.writing-block-text:focus {
+  background: var(--bg-secondary);
+  box-shadow: inset 0 0 0 1px var(--divider);
+}
+.writing-block-text:empty::before {
+  content: '';
+  display: inline-block;
+}
+
+/* Processing indicator — refined ambient glow */
 .writing-processing {
-  height: 2px; margin: 4px 0 8px; overflow: hidden;
-  animation: processingFadeIn 0.3s ease;
+  position: absolute;
+  left: -8px; top: 0; bottom: 0;
+  width: 2px; pointer-events: none;
 }
-.processing-line {
-  height: 100%; width: 100%;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-  animation: processingSlide 1.8s ease-in-out infinite;
+.processing-glow {
+  width: 100%; height: 100%;
   border-radius: 1px;
+  background: var(--accent);
+  animation: glowPulse 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
-@keyframes processingSlide {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(100%); }
-}
-@keyframes processingFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+@keyframes glowPulse {
+  0%, 100% { opacity: 0.15; box-shadow: 0 0 4px var(--accent); }
+  50% { opacity: 0.6; box-shadow: 0 0 12px var(--accent); }
 }
 
 /* AI Separator line — draws in elegantly before response */
 .ai-separator {
-  margin: 6px 0 2px;
+  margin: 10px 0 4px;
   overflow: hidden;
   height: 1px;
 }
 .ai-separator-line {
   height: 100%;
-  background: var(--divider);
-  animation: separatorDraw 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--divider) 100%);
+  animation: separatorDraw 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   transform-origin: left;
 }
 @keyframes separatorDraw {
   0% { transform: scaleX(0); opacity: 0; }
-  30% { opacity: 0.5; }
-  100% { transform: scaleX(1); opacity: 1; }
+  20% { opacity: 0.4; }
+  100% { transform: scaleX(1); opacity: 0.6; }
 }
 
 /* User writing — non-editable fallback (loaded from past) */
@@ -1749,91 +1861,91 @@ body {
 .merge-label { font-family: 'DM Sans', sans-serif; font-size: 0.65rem; color: var(--text-light); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; padding: 2px 0; }
 
 /* AI Annotation */
-.si-annotation { display: flex; gap: 0; margin: 8px 0 12px; cursor: default; }
+.si-annotation { display: flex; gap: 0; margin: 10px 0 14px; cursor: default; }
 .si-annotation.wave-in { animation: waterfallIn 0.4s ease both; }
-.si-annotation:not(.si-inserting):not(.stream-exit):not(.wave-in) { animation: aiFade 0.4s ease; }
+.si-annotation.ai-reveal { animation: aiRevealIn 0.65s cubic-bezier(0.16, 1, 0.3, 1) both; }
 .si-annotation.stream-exit { animation: streamExit 0.35s ease forwards; }
-.anno-bar { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.5; flex-shrink: 0; }
+.anno-bar { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.4; flex-shrink: 0; transition: opacity 0.3s; }
+.si-annotation:hover .anno-bar { opacity: 0.7; }
 .anno-body { padding: 4px 0 4px 14px; font-size: 0.84rem; color: var(--text-muted); line-height: 1.6; }
 .anno-text { white-space: pre-wrap; word-break: break-word; }
-.anno-link { font-family: 'DM Sans', sans-serif; font-size: 0.68rem; color: var(--accent); cursor: pointer; margin-top: 4px; display: inline-block; text-decoration: underline; text-underline-offset: 2px; opacity: 0.8; }
+.anno-link { font-family: 'DM Sans', sans-serif; font-size: 0.68rem; color: var(--accent); cursor: pointer; margin-top: 4px; display: inline-block; text-decoration: underline; text-underline-offset: 2px; opacity: 0.8; transition: opacity 0.15s; }
 .anno-link:hover { opacity: 1; }
 
 /* AI Conversational */
-.si-conv { margin: 10px 0 14px; padding: 14px 18px; background: var(--conv-bg); border-radius: 12px; cursor: default; font-size: 0.92rem; line-height: 1.65; }
+.si-conv {
+  margin: 12px 0 16px; padding: 16px 20px;
+  background: var(--conv-bg); border-radius: 14px;
+  cursor: default; font-size: 0.92rem; line-height: 1.65;
+  border: 1px solid transparent;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.si-conv:hover { border-color: var(--divider); }
 .si-conv.wave-in { animation: waterfallIn 0.4s ease both; }
-.si-conv:not(.si-inserting):not(.stream-exit):not(.wave-in) { animation: aiFade 0.4s ease; }
+.si-conv.ai-reveal { animation: aiRevealIn 0.65s cubic-bezier(0.16, 1, 0.3, 1) both; }
 .si-conv.stream-exit { animation: streamExit 0.35s ease forwards; }
 
-/* ═══ Insertion Animation — AI slides in with height reveal ═══ */
-.si-inserting {
-  animation: insertReveal 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-  transform-origin: top;
-}
-
-@keyframes insertReveal {
+/* AI Reveal — elegant height+opacity entrance */
+@keyframes aiRevealIn {
   0% {
     opacity: 0;
-    max-height: 0;
-    margin-top: 0;
-    margin-bottom: 0;
-    padding-top: 0;
-    padding-bottom: 0;
-    transform: translateY(-8px);
-    overflow: hidden;
+    transform: translateY(8px);
+    clip-path: inset(0 0 100% 0);
   }
   40% {
-    opacity: 0.3;
-    max-height: 200px;
-    overflow: hidden;
-  }
-  70% {
-    opacity: 0.7;
-    max-height: 600px;
+    opacity: 0.6;
+    clip-path: inset(0 0 40% 0);
   }
   100% {
     opacity: 1;
-    max-height: 2000px;
     transform: translateY(0);
+    clip-path: inset(0 0 0% 0);
   }
 }
 
-/* ═══ Redo Button ═══ */
+/* ═══ Redo Button — refined micro-interaction ═══ */
 .redo-btn {
-  display: inline-flex; align-items: center; gap: 5px;
-  margin-top: 8px; padding: 4px 10px;
-  background: var(--accent-bg); border: 1px solid var(--accent-light);
-  border-radius: 8px; cursor: pointer;
-  font-family: 'DM Sans', sans-serif; font-size: 0.68rem;
-  color: var(--accent); letter-spacing: 0.02em;
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-  animation: redoAppear 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-top: 10px; padding: 5px 12px 5px 10px;
+  background: transparent; border: 1px solid var(--divider);
+  border-radius: 20px; cursor: pointer;
+  font-family: 'DM Sans', sans-serif; font-size: 0.66rem; font-weight: 500;
+  color: var(--text-muted); letter-spacing: 0.02em;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: redoAppear 0.5s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .redo-btn:hover {
   background: var(--accent); color: white; border-color: var(--accent);
-  transform: translateY(-1px); box-shadow: 0 2px 8px rgba(196,119,90,0.2);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(196,119,90,0.25);
 }
-.redo-btn:active { transform: scale(0.96); }
-.redo-btn svg { flex-shrink: 0; }
+.redo-btn:hover svg { transform: rotate(-45deg); }
+.redo-btn:active { transform: translateY(0) scale(0.95); box-shadow: none; }
+.redo-btn svg { flex-shrink: 0; transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
 @keyframes redoAppear {
   from { opacity: 0; transform: translateY(4px) scale(0.95); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-/* ═══ Waterfall & Exit Animations ═══ */
+/* ═══ Waterfall & Exit Animations — refined ═══ */
 @keyframes waterfallIn {
-  0% { opacity: 0; }
-  100% { opacity: 1; }
+  0% { opacity: 0; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 @keyframes streamExit {
-  0% { opacity: 1; }
-  100% { opacity: 0; }
+  0% { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-6px) scale(0.98); }
 }
 
 .conv-text { white-space: pre-wrap; word-break: break-word; }
 
 /* ═══ Writing Input ═══ */
-#writing-input { margin-top: 2px; cursor: text; }
+#writing-input {
+  margin-top: 4px; cursor: text;
+  border-radius: 8px;
+  transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+  border: 2px solid transparent;
+}
 #tinput {
   width: 100%; border: none; outline: none; background: transparent;
   font-family: 'Source Serif 4', Georgia, serif; font-size: inherit;
@@ -1841,7 +1953,14 @@ body {
   min-height: 48px; max-height: 300px; overflow-y: auto;
   caret-color: var(--accent);
 }
-#tinput::placeholder { color: var(--text-light); opacity: 0.35; font-style: italic; }
+#tinput::placeholder { color: var(--text-light); opacity: 0.3; font-style: italic; }
+
+/* Drag-over state */
+#writing-input.drag-over {
+  background: var(--accent-bg);
+  border-color: var(--accent-light);
+  box-shadow: inset 0 0 0 1px var(--accent-light);
+}
 
 /* ═══ Thinking ═══ */
 .thinking { display: flex; gap: 5px; padding: 8px 2px; }
@@ -1851,20 +1970,6 @@ body {
 @keyframes breathe { 0%,100% { opacity: 0.15; transform: scale(0.8); } 50% { opacity: 0.55; transform: scale(1.15); } }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes aiFade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
-
-/* ═══ Send Hint ═══ */
-#send-hint {
-  display: flex; align-items: center; justify-content: center; gap: 8px;
-  margin-top: 16px; padding: 12px 20px;
-  cursor: pointer; border-radius: 10px;
-  background: var(--hover-bg); border: 1px solid var(--divider);
-  transition: all 0.25s; opacity: 0.4;
-  -webkit-tap-highlight-color: transparent;
-}
-#send-hint:hover { opacity: 0.7; background: var(--accent-bg); border-color: var(--accent-light); }
-#send-hint:active { transform: scale(0.98); opacity: 1; }
-.send-hint-text { font-family: 'DM Sans', sans-serif; font-size: 0.7rem; color: var(--text-muted); letter-spacing: 0.04em; }
-.send-hint-key { font-family: 'DM Sans', sans-serif; font-size: 0.6rem; color: var(--text-light); background: var(--bg-secondary); padding: 2px 7px; border-radius: 4px; }
 
 /* ═══ Error ═══ */
 .error-bar { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--error-bg); color: white; padding: 12px 18px; border-radius: 14px; font-family: 'DM Sans', sans-serif; font-size: 0.82rem; z-index: 60; display: flex; align-items: center; gap: 14px; box-shadow: 0 4px 24px rgba(0,0,0,0.2); animation: errorSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); max-width: calc(100vw - 32px); cursor: default; }
@@ -1929,64 +2034,129 @@ body {
 .ecard-del:hover { opacity: 0.7; color: var(--error-bg); }
 .ecard-del.confirming { opacity: 1; color: var(--error-bg); background: rgba(192,57,43,0.1); }
 
-/* ═══ Inline Image ═══ */
-.si-image-wrap { margin: 8px 0; clear: both; }
-.si-image-wrap::after { content: ''; display: table; clear: both; }
-.si-image {
-  position: relative; border-radius: 8px; overflow: visible;
-  cursor: default; transition: box-shadow 0.25s ease;
-  margin: 0 auto;
+/* ═══ Inline Images — inside writing blocks with real text wrapping ═══ */
+.inline-img {
+  position: relative;
+  border-radius: 10px;
+  overflow: visible;
+  cursor: default;
+  transition: box-shadow 0.3s ease, opacity 0.4s ease;
+  animation: imgFadeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-.si-image:hover { box-shadow: 0 2px 16px var(--shadow-md); }
-.si-image.resizing { user-select: none; }
-.si-image img {
-  width: 100%; height: auto; display: block; border-radius: 8px;
-  pointer-events: none; transition: border-radius 0.2s;
+@keyframes imgFadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+.inline-img:hover { box-shadow: 0 4px 24px var(--shadow-md); }
+.inline-img.is-resizing { user-select: none; z-index: 10; }
+.inline-img.is-uploading { opacity: 0.7; }
+
+/* Image element */
+.inline-img-el {
+  width: 100%; height: auto; display: block;
+  border-radius: 10px;
+  opacity: 0;
+  transition: opacity 0.4s ease, border-radius 0.2s ease;
+}
+.inline-img-el.revealed { opacity: 1; }
+
+/* Float positioning — the key to text wrapping */
+.inline-img.img-float-center { display: block; margin: 8px auto; }
+.inline-img.img-float-left { float: left; margin: 4px 18px 10px 0; }
+.inline-img.img-float-right { float: right; margin: 4px 0 10px 18px; }
+
+/* Upload shimmer */
+.img-upload-shimmer {
+  position: absolute; inset: 0; border-radius: 10px; z-index: 2;
+  background: linear-gradient(
+    110deg,
+    transparent 30%,
+    rgba(196,119,90,0.08) 50%,
+    transparent 70%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.8s ease-in-out infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
-/* Float positioning */
-.si-image.img-float-none { display: block; margin: 0 auto; }
-.si-image.img-float-left { float: left; margin: 0 16px 8px 0; }
-.si-image.img-float-right { float: right; margin: 0 0 8px 16px; }
-
-/* Resize handle */
-.img-resize-handle {
-  position: absolute; right: -4px; top: 0; bottom: 0; width: 10px;
-  cursor: ew-resize; background: transparent;
-  transition: background 0.2s;
+/* Resize handle — elegant edge grip */
+.img-resize {
+  position: absolute; right: -6px; top: 8px; bottom: 8px; width: 14px;
+  cursor: col-resize; display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity 0.25s ease;
 }
-.img-resize-handle:hover, .si-image.resizing .img-resize-handle {
-  background: linear-gradient(90deg, transparent, var(--accent) 40%, var(--accent) 60%, transparent);
-  opacity: 0.5; border-radius: 4px;
+.inline-img:hover .img-resize,
+.inline-img.is-resizing .img-resize { opacity: 1; }
+.img-resize-grip {
+  width: 4px; height: 28px; border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.4;
+  transition: opacity 0.15s, height 0.15s;
+}
+.img-resize:hover .img-resize-grip,
+.inline-img.is-resizing .img-resize-grip {
+  opacity: 0.8; height: 40px;
 }
 
-/* Controls overlay */
-.img-controls {
-  position: absolute; top: -36px; left: 50%; transform: translateX(-50%);
+/* Size badge during resize */
+.img-size-badge {
+  position: absolute; bottom: -24px; left: 50%;
+  transform: translateX(-50%);
+  font-family: 'DM Sans', sans-serif; font-size: 0.6rem; font-weight: 500;
+  color: var(--text-muted);
+  background: var(--panel-bg); border: 1px solid var(--divider);
+  padding: 2px 8px; border-radius: 6px;
+  box-shadow: 0 2px 8px var(--shadow);
+  pointer-events: none;
+  animation: badgePop 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes badgePop {
+  from { opacity: 0; transform: translateX(-50%) translateY(4px) scale(0.9); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+
+/* Floating toolbar */
+.img-toolbar {
+  position: absolute; top: -40px; left: 50%;
+  transform: translateX(-50%) translateY(4px);
   display: flex; gap: 2px; padding: 4px;
   background: var(--panel-bg); border: 1px solid var(--divider);
-  border-radius: 10px; box-shadow: 0 4px 16px var(--shadow-md);
-  opacity: 0; pointer-events: none; transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-  white-space: nowrap;
-}
-.img-controls.visible { opacity: 1; pointer-events: all; transform: translateX(-50%) translateY(0); }
-.img-ctrl-btn {
-  width: 28px; height: 28px; border: none; background: none; border-radius: 6px;
-  cursor: pointer; display: flex; align-items: center; justify-content: center;
-  color: var(--text-muted); transition: all 0.15s;
-}
-.img-ctrl-btn:hover { background: var(--hover-bg); color: var(--text); }
-.img-ctrl-btn.active { background: var(--accent-bg); color: var(--accent); }
-.img-ctrl-btn.img-ctrl-delete:hover { background: rgba(192,57,43,0.1); color: var(--error-bg); }
-.img-ctrl-divider { width: 1px; background: var(--divider); margin: 2px 2px; }
-
-/* Drag-over state for writing input */
-#writing-input.drag-over {
-  background: var(--accent-bg);
-  border: 2px dashed var(--accent-light);
   border-radius: 12px;
-  transition: all 0.2s ease;
+  box-shadow: 0 4px 20px var(--shadow-md), 0 1px 3px var(--shadow);
+  opacity: 0; pointer-events: none;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap; z-index: 20;
 }
+.img-toolbar.visible {
+  opacity: 1; pointer-events: all;
+  transform: translateX(-50%) translateY(0);
+}
+.img-tb-btn {
+  width: 30px; height: 30px; border: none; background: none; border-radius: 8px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted); transition: all 0.2s ease;
+}
+.img-tb-btn:hover { background: var(--hover-bg); color: var(--text); }
+.img-tb-btn.active { background: var(--accent-bg); color: var(--accent); }
+.img-tb-btn.img-tb-delete:hover { background: rgba(192,57,43,0.1); color: var(--error-bg); }
+.img-tb-sep { width: 1px; background: var(--divider); margin: 4px 2px; }
+
+/* ═══ Send Hint — refined ═══ */
+#send-hint {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  margin-top: 16px; padding: 12px 20px;
+  cursor: pointer; border-radius: 12px;
+  background: var(--hover-bg); border: 1px solid var(--divider);
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1); opacity: 0.35;
+  -webkit-tap-highlight-color: transparent;
+}
+#send-hint:hover { opacity: 0.7; background: var(--accent-bg); border-color: var(--accent-light); transform: translateY(-1px); }
+#send-hint:active { transform: scale(0.98); opacity: 1; }
+.send-hint-text { font-family: 'DM Sans', sans-serif; font-size: 0.7rem; color: var(--text-muted); letter-spacing: 0.04em; }
+.send-hint-key { font-family: 'DM Sans', sans-serif; font-size: 0.6rem; color: var(--text-light); background: var(--bg-secondary); padding: 2px 7px; border-radius: 4px; }
 
 /* ═══ Import Panel ═══ */
 .import-panel {
