@@ -8,17 +8,27 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 
 interface StreamItem {
   id?: string
-  type: 'writing' | 'ai-annotation' | 'ai-conversational' | 'merged-header'
+  uid: string // unique client-side ID for tracking
+  type: 'writing' | 'ai-annotation' | 'ai-conversational' | 'merged-header' | 'image'
   content: string
   tone?: string
   linked_entry_id?: string | null
   tool_call?: any
   animating?: boolean
-  mergedFrom?: string  // entry title for merged content
-  waveDelay?: number   // ms delay for waterfall animation
-  exiting?: boolean    // exit animation flag
-  exitDelay?: number   // ms delay for staggered exit
-  isNew?: boolean      // true = live AI insertion, false/undefined = loaded from past
+  mergedFrom?: string
+  waveDelay?: number
+  exiting?: boolean
+  exitDelay?: number
+  isNew?: boolean
+  // ─── Edit tracking ───
+  sourceUid?: string
+  originalContent?: string
+  editedSinceProcess?: boolean
+  processing?: boolean
+  // ─── Image ───
+  imageUrl?: string
+  imageWidth?: number  // percentage of container width (10-100)
+  imageFloat?: 'none' | 'left' | 'right'
 }
 
 interface ModelOption {
@@ -46,8 +56,12 @@ interface AppState {
   model: string
   models: ModelOption[]
   modelPickerOpen: boolean
-  streamFadeMs: number  // >0 = stream container fading in over this duration
+  streamFadeMs: number
+  importOpen: boolean
 }
+
+let _uid = 0
+function uid() { return `si-${++_uid}-${Date.now()}` }
 
 // ═══════════════════════════════════════════
 // LOGIN SCREEN
@@ -94,23 +108,17 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
 
   return (
     <div className="login-screen">
-      {/* Subtle background texture */}
       <div className="login-bg-grain" />
-
       <div className="login-card">
-        {/* Lock icon */}
         <div className="login-lock">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
             <path d="M7 11V7a5 5 0 0 1 10 0v4" />
           </svg>
         </div>
-
         <h1 className="login-title">Smart Notebook</h1>
-
         <form className={`login-form ${shake ? 'shake' : ''}`} onSubmit={submit} autoComplete="on" method="post" action="">
           <input type="text" name="username" autoComplete="username" defaultValue="notebook" style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} tabIndex={-1} aria-hidden="true" />
-
           <label className="login-label" htmlFor="password">Password</label>
           <div className="login-input-wrap">
             <input
@@ -132,9 +140,7 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
                 : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>}
             </button>
           </div>
-
           {err && <p className="login-err">{err}</p>}
-
           <button type="submit" className="login-btn" disabled={loading}>
             {loading
               ? <><svg className="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg><span>Signing in...</span></>
@@ -206,13 +212,120 @@ function chartColor(i: number, a: number) {
 }
 
 // ═══════════════════════════════════════════
+// IMPORT PANEL — Genspark conversation import
+// ═══════════════════════════════════════════
+
+function ImportPanel({ open, onClose, onImported }: { open: boolean; onClose: () => void; onImported: (entryId: string) => void }) {
+  const [url, setUrl] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [preview, setPreview] = useState<any>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (open) { setUrl(''); setError(''); setPreview(null); setTimeout(() => inputRef.current?.focus(), 200) }
+  }, [open])
+
+  const handleFetch = async () => {
+    if (!url.trim()) return
+    setLoading(true)
+    setError('')
+    setPreview(null)
+    try {
+      const res = await fetch('/api/import/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url.trim() }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.error || 'Failed to fetch conversation'); setLoading(false); return }
+      setPreview(data)
+    } catch {
+      setError('Connection error — check your network')
+    }
+    setLoading(false)
+  }
+
+  const handleImport = async () => {
+    if (!preview) return
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch('/api/import/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url.trim(), messages: preview.messages, title: preview.title }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.error || 'Failed to import'); setLoading(false); return }
+      onImported(data.entryId)
+      onClose()
+    } catch {
+      setError('Connection error')
+    }
+    setLoading(false)
+  }
+
+  return (
+    <>
+      <div className={`panel-bg ${open ? 'open' : ''}`} onClick={onClose} />
+      <div className={`import-panel ${open ? 'open' : ''}`}>
+        <div className="p-head">
+          <span className="p-title">Import Conversation</span>
+          <button className="p-close" onClick={onClose}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></button>
+        </div>
+        <div className="import-body">
+          <p className="import-desc">Paste a shared Genspark conversation link to import it as a notebook entry.</p>
+          <div className="import-input-row">
+            <input
+              ref={inputRef}
+              type="url"
+              className="import-url-input"
+              placeholder="https://www.genspark.ai/..."
+              value={url}
+              onChange={e => setUrl(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleFetch() }}
+              disabled={loading}
+            />
+            <button className="import-fetch-btn" onClick={handleFetch} disabled={loading || !url.trim()}>
+              {loading && !preview ? <svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> : 'Fetch'}
+            </button>
+          </div>
+          {error && <div className="import-error">{error}</div>}
+          {preview && (
+            <div className="import-preview">
+              <div className="import-preview-title">{preview.title || 'Untitled Conversation'}</div>
+              <div className="import-preview-count">{preview.messages?.length || 0} messages found</div>
+              <div className="import-preview-msgs">
+                {(preview.messages || []).slice(0, 6).map((m: any, i: number) => (
+                  <div key={i} className={`import-msg ${m.role}`}>
+                    <span className="import-msg-role">{m.role === 'user' ? 'You' : 'AI'}</span>
+                    <span className="import-msg-text">{m.content.slice(0, 150)}{m.content.length > 150 ? '...' : ''}</span>
+                  </div>
+                ))}
+                {(preview.messages || []).length > 6 && (
+                  <div className="import-more">+{preview.messages.length - 6} more messages</div>
+                )}
+              </div>
+              <button className="import-save-btn" onClick={handleImport} disabled={loading}>
+                {loading ? <><svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> Importing...</> : `Import ${preview.messages?.length || 0} messages`}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ═══════════════════════════════════════════
 // SIDE PANEL WITH DELETE
 // ═══════════════════════════════════════════
 
 function SidePanel({ open, onClose, onLoadEntry, onDeleteEntry }: { open: boolean; onClose: () => void; onLoadEntry: (id: string) => void; onDeleteEntry: (id: string) => void }) {
   const [entries, setEntries] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
-  const [loaded, setLoaded] = useState(false)  // tracks if first load is done for fade-in
+  const [loaded, setLoaded] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
   useEffect(() => { if (open) { setLoaded(false); loadEntries(); setConfirmDelete(null) } }, [open])
@@ -223,7 +336,6 @@ function SidePanel({ open, onClose, onLoadEntry, onDeleteEntry }: { open: boolea
       if (r.ok) { const d = await r.json(); setEntries(d.entries || []) }
     } catch {}
     setLoading(false)
-    // Small delay so the fade-in starts after React renders the entries
     requestAnimationFrame(() => { requestAnimationFrame(() => setLoaded(true)) })
   }
 
@@ -289,6 +401,175 @@ function EntryCard({ entry, onClick, onDelete, confirming }: { entry: any; onCli
 }
 
 // ═══════════════════════════════════════════
+// INLINE IMAGE — resizable, floatable
+// ═══════════════════════════════════════════
+
+function InlineImage({ item, onResize, onChangeFloat, onRemove }: { 
+  item: StreamItem
+  onResize: (width: number) => void
+  onChangeFloat: (float: 'none' | 'left' | 'right') => void
+  onRemove: () => void
+}) {
+  const [showControls, setShowControls] = useState(false)
+  const [resizing, setResizing] = useState(false)
+  const imgRef = useRef<HTMLDivElement>(null)
+  const startXRef = useRef(0)
+  const startWidthRef = useRef(0)
+
+  const width = item.imageWidth || 50
+  const float = item.imageFloat || 'none'
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setResizing(true)
+    startXRef.current = e.clientX
+    startWidthRef.current = width
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const containerWidth = imgRef.current?.parentElement?.offsetWidth || 680
+      const deltaX = e.clientX - startXRef.current
+      const deltaPercent = (deltaX / containerWidth) * 100
+      const newWidth = Math.max(15, Math.min(100, startWidthRef.current + deltaPercent))
+      onResize(Math.round(newWidth))
+    }
+
+    const handleMouseUp = () => {
+      setResizing(false)
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+  }
+
+  // Touch support for mobile
+  const handleTouchStart = (e: React.TouchEvent) => {
+    e.stopPropagation()
+    setResizing(true)
+    startXRef.current = e.touches[0].clientX
+    startWidthRef.current = width
+
+    const handleTouchMove = (e: TouchEvent) => {
+      const containerWidth = imgRef.current?.parentElement?.offsetWidth || 680
+      const deltaX = e.touches[0].clientX - startXRef.current
+      const deltaPercent = (deltaX / containerWidth) * 100
+      const newWidth = Math.max(15, Math.min(100, startWidthRef.current + deltaPercent))
+      onResize(Math.round(newWidth))
+    }
+
+    const handleTouchEnd = () => {
+      setResizing(false)
+      window.removeEventListener('touchmove', handleTouchMove)
+      window.removeEventListener('touchend', handleTouchEnd)
+    }
+
+    window.addEventListener('touchmove', handleTouchMove)
+    window.addEventListener('touchend', handleTouchEnd)
+  }
+
+  const floatClass = float === 'left' ? 'img-float-left' : float === 'right' ? 'img-float-right' : 'img-float-none'
+
+  return (
+    <div
+      ref={imgRef}
+      className={`si-image ${floatClass} ${resizing ? 'resizing' : ''}`}
+      style={{ width: `${width}%` }}
+      onClick={e => { e.stopPropagation(); setShowControls(!showControls) }}
+      onMouseEnter={() => setShowControls(true)}
+      onMouseLeave={() => { if (!resizing) setShowControls(false) }}
+    >
+      <img src={item.imageUrl} alt="" draggable={false} />
+      
+      {/* Resize handle */}
+      <div
+        className="img-resize-handle"
+        onMouseDown={handleMouseDown}
+        onTouchStart={handleTouchStart}
+      />
+
+      {/* Controls overlay */}
+      <div className={`img-controls ${showControls ? 'visible' : ''}`}>
+        <button
+          className={`img-ctrl-btn ${float === 'left' ? 'active' : ''}`}
+          onClick={e => { e.stopPropagation(); onChangeFloat(float === 'left' ? 'none' : 'left') }}
+          title="Float left (text wraps right)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="8" height="8" rx="1" /><line x1="14" y1="4" x2="22" y2="4" /><line x1="14" y1="8" x2="22" y2="8" /><line x1="2" y1="16" x2="22" y2="16" /><line x1="2" y1="20" x2="22" y2="20" /></svg>
+        </button>
+        <button
+          className={`img-ctrl-btn ${float === 'none' ? 'active' : ''}`}
+          onClick={e => { e.stopPropagation(); onChangeFloat('none') }}
+          title="Center (no text wrap)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="3" width="12" height="8" rx="1" /><line x1="2" y1="16" x2="22" y2="16" /><line x1="2" y1="20" x2="22" y2="20" /></svg>
+        </button>
+        <button
+          className={`img-ctrl-btn ${float === 'right' ? 'active' : ''}`}
+          onClick={e => { e.stopPropagation(); onChangeFloat(float === 'right' ? 'none' : 'right') }}
+          title="Float right (text wraps left)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="14" y="3" width="8" height="8" rx="1" /><line x1="2" y1="4" x2="10" y2="4" /><line x1="2" y1="8" x2="10" y2="8" /><line x1="2" y1="16" x2="22" y2="16" /><line x1="2" y1="20" x2="22" y2="20" /></svg>
+        </button>
+        <div className="img-ctrl-divider" />
+        <button
+          className="img-ctrl-btn img-ctrl-delete"
+          onClick={e => { e.stopPropagation(); onRemove() }}
+          title="Remove image"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════
+// EDITABLE WRITING BLOCK
+// ═══════════════════════════════════════════
+
+function WritingBlock({ item, onEdit, onClick }: { item: StreamItem; onEdit: (newContent: string) => void; onClick?: (e: React.MouseEvent) => void }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [editing, setEditing] = useState(false)
+  const lastContentRef = useRef(item.content)
+
+  // Sync content from props only when not editing
+  useEffect(() => {
+    if (!editing && ref.current && ref.current.textContent !== item.content) {
+      ref.current.textContent = item.content
+    }
+    lastContentRef.current = item.content
+  }, [item.content, editing])
+
+  const handleBlur = () => {
+    setEditing(false)
+    const text = ref.current?.textContent || ''
+    if (text !== lastContentRef.current) {
+      onEdit(text)
+    }
+  }
+
+  const handleInput = () => {
+    if (!editing) setEditing(true)
+  }
+
+  return (
+    <div
+      ref={ref}
+      className="si-writing-editable"
+      contentEditable
+      suppressContentEditableWarning
+      spellCheck
+      onInput={handleInput}
+      onBlur={handleBlur}
+      onClick={onClick}
+      dangerouslySetInnerHTML={{ __html: item.content }}
+    />
+  )
+}
+
+// ═══════════════════════════════════════════
 // MAIN APP — JOURNAL CANVAS
 // ═══════════════════════════════════════════
 
@@ -303,6 +584,7 @@ export default function Home() {
     models: [],
     modelPickerOpen: false,
     streamFadeMs: 0,
+    importOpen: false,
   })
 
   const [input, setInput] = useState('')
@@ -312,13 +594,13 @@ export default function Home() {
   const allTextRef = useRef('')
   const busyRef = useRef(false)
   const streamEndRef = useRef<HTMLDivElement>(null)
-  const streamRef = useRef<StreamItem[]>([])  // mirror of state.stream for async access
+  const streamRef = useRef<StreamItem[]>([])
   const entryIdRef = useRef<string | null>(null)
-  const queueRef = useRef<Array<{ text: string; userRequested: boolean; insertIdx: number }>>([])
+  const queueRef = useRef<Array<{ text: string; userRequested: boolean; insertIdx: number; writingUid: string }>>([])
   const processingRef = useRef(false)
-  const continuationCheckedRef = useRef(false)  // ref mirror to avoid stale closures
+  const continuationCheckedRef = useRef(false)
   const modelRef = useRef(typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-haiku-4.5') : 'claude-haiku-4.5')
-  const exitingRef = useRef(false)  // tracks if stream is in exit animation
+  const exitingRef = useRef(false)
 
   const s = useCallback((update: Partial<AppState> | ((prev: AppState) => AppState)) => {
     if (typeof update === 'function') setState(update)
@@ -332,10 +614,9 @@ export default function Home() {
   useEffect(() => { continuationCheckedRef.current = state.continuationChecked }, [state.continuationChecked])
   useEffect(() => { modelRef.current = state.model }, [state.model])
 
-  // ─── Theme — follows system preference, updates live ───
+  // ─── Theme — follows system preference ───
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
-
     const apply = (dark: boolean) => {
       if (dark) {
         document.documentElement.setAttribute('data-theme', 'dark')
@@ -345,11 +626,7 @@ export default function Home() {
         s({ theme: 'light' })
       }
     }
-
-    // Apply immediately on mount
     apply(mq.matches)
-
-    // Listen for system changes (e.g. user toggles iOS dark mode)
     const handler = (e: MediaQueryListEvent) => apply(e.matches)
     mq.addEventListener('change', handler)
     return () => mq.removeEventListener('change', handler)
@@ -358,7 +635,6 @@ export default function Home() {
   // ─── Auth ───
   useEffect(() => { checkAuth() }, [])
 
-  // ─── Load available models ───
   const loadModels = async () => {
     try {
       const res = await fetch('/api/models')
@@ -404,7 +680,6 @@ export default function Home() {
   // ─── New entry — with exit animation ───
   const newEntry = () => {
     if (streamRef.current.length === 0) {
-      // Nothing to animate out — just reset
       s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null, streamFadeMs: 0 })
       lastSentRef.current = ''
       allTextRef.current = ''
@@ -415,21 +690,18 @@ export default function Home() {
       return
     }
 
-    // Trigger exit animation
     exitingRef.current = true
     s(prev => ({
       ...prev,
       stream: prev.stream.map((item, i) => ({
         ...item,
         exiting: true,
-        exitDelay: i * 25,  // stagger each item 25ms
+        exitDelay: i * 25,
       })),
     }))
 
-    // After the LAST item's animation finishes (delay + duration), clear everything
-    // Each item: exitDelay + 400ms animation = total time for that item
     const lastItemDelay = Math.min((streamRef.current.length - 1) * 25, 350)
-    const duration = lastItemDelay + 450 + 100  // +100ms extra buffer for smoothness
+    const duration = lastItemDelay + 450 + 100
     setTimeout(() => {
       exitingRef.current = false
       s({ entryId: null, stream: [], continuationChecked: false, greetingVisible: false, error: null, entryTitle: null, streamFadeMs: 0 })
@@ -446,6 +718,138 @@ export default function Home() {
     if (state.entryId === id) newEntry()
   }
 
+  // ─── Handle writing block edits ───
+  const handleWritingEdit = (itemUid: string, newContent: string) => {
+    s(prev => {
+      const newStream = prev.stream.map(item => {
+        if (item.uid === itemUid && item.type === 'writing') {
+          const wasProcessed = item.originalContent != null
+          const isChanged = wasProcessed && newContent !== item.originalContent
+          return { ...item, content: newContent, editedSinceProcess: isChanged }
+        }
+        // Mark linked AI responses as stale
+        if (item.sourceUid === itemUid && (item.type === 'ai-annotation' || item.type === 'ai-conversational')) {
+          const sourceItem = prev.stream.find(s => s.uid === itemUid)
+          if (sourceItem && sourceItem.originalContent != null && newContent !== sourceItem.originalContent) {
+            return { ...item, editedSinceProcess: true }
+          }
+        }
+        return item
+      })
+      return { ...prev, stream: newStream }
+    })
+  }
+
+  // ─── Redo: reprocess a writing block with the AI ───
+  const handleRedo = (sourceUid: string) => {
+    const sourceItem = streamRef.current.find(i => i.uid === sourceUid)
+    if (!sourceItem || sourceItem.type !== 'writing') return
+
+    // Remove old AI responses for this source
+    s(prev => ({
+      ...prev,
+      stream: prev.stream.filter(item => item.sourceUid !== sourceUid),
+    }))
+
+    // Re-enqueue with updated content
+    const text = sourceItem.content
+    const insertIdx = streamRef.current.findIndex(i => i.uid === sourceUid)
+
+    // Update original content to match current
+    s(prev => ({
+      ...prev,
+      stream: prev.stream.map(item => 
+        item.uid === sourceUid 
+          ? { ...item, originalContent: text, editedSinceProcess: false, processing: true }
+          : item
+      ),
+    }))
+
+    queueRef.current.push({ text, userRequested: true, insertIdx, writingUid: sourceUid })
+    processQueue()
+  }
+
+  // ─── Image upload handler ───
+  const uploadImage = async (file: File) => {
+    const reader = new FileReader()
+    reader.onload = async () => {
+      const base64 = reader.result as string
+
+      // Add image to stream immediately with base64 data URL
+      const imageItem: StreamItem = {
+        uid: uid(),
+        type: 'image',
+        content: '',
+        imageUrl: base64,
+        imageWidth: 50,
+        imageFloat: 'none',
+        animating: true,
+        isNew: true,
+      }
+
+      s(prev => ({
+        ...prev,
+        stream: [...prev.stream, imageItem],
+        greetingVisible: false,
+      }))
+      scrollToBottom()
+
+      // Upload to server in background
+      try {
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            image: base64,
+            filename: file.name,
+            contentType: file.type,
+          }),
+        })
+        const data = await res.json()
+        if (data.url && data.url !== base64) {
+          // Replace base64 with server URL
+          s(prev => ({
+            ...prev,
+            stream: prev.stream.map(item =>
+              item.uid === imageItem.uid ? { ...item, imageUrl: data.url } : item
+            ),
+          }))
+        }
+      } catch {
+        // Keep base64 URL if upload fails — it still works
+      }
+    }
+    reader.readAsDataURL(file)
+  }
+
+  // ─── Handle image resize ───
+  const handleImageResize = (itemUid: string, width: number) => {
+    s(prev => ({
+      ...prev,
+      stream: prev.stream.map(item =>
+        item.uid === itemUid ? { ...item, imageWidth: width } : item
+      ),
+    }))
+  }
+
+  // ─── Handle image float change ───
+  const handleImageFloat = (itemUid: string, float: 'none' | 'left' | 'right') => {
+    s(prev => ({
+      ...prev,
+      stream: prev.stream.map(item =>
+        item.uid === itemUid ? { ...item, imageFloat: float } : item
+      ),
+    }))
+  }
+
+  // ─── Handle image remove ───
+  const handleImageRemove = (itemUid: string) => {
+    s(prev => ({
+      ...prev,
+      stream: prev.stream.filter(item => item.uid !== itemUid),
+    }))
+  }
+
   // ─── Load entry — MERGE into current thread, don't replace ───
   const loadEntry = async (entryId: string, isMerge?: boolean) => {
     try {
@@ -454,48 +858,51 @@ export default function Home() {
       const data = await res.json()
       if (!data.entry) return
 
-      const items: StreamItem[] = (data.messages || []).map((m: any, idx: number) => ({
-        id: m.id,
-        type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
-        content: m.content,
-        tone: m.tone,
-        linked_entry_id: m.linked_entry_id,
-        tool_call: m.tool_call,
-        animating: true,
-        waveDelay: idx * 80,  // waterfall: 80ms stagger between items
-      }))
+      const items: StreamItem[] = (data.messages || []).map((m: any, idx: number) => {
+        const itemUid = uid()
+        return {
+          uid: itemUid,
+          id: m.id,
+          type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
+          content: m.content,
+          tone: m.tone,
+          linked_entry_id: m.linked_entry_id,
+          tool_call: m.tool_call,
+          animating: true,
+          waveDelay: idx * 80,
+          originalContent: m.sender === 'user' ? m.content : undefined,
+        }
+      })
 
-      // If we're merging (from AI tool call or link), insert into current stream
-      // If we're loading fresh (from sidebar or greeting), replace
+      // Link AI items to their preceding writing block
+      let lastWritingUid: string | null = null
+      for (const item of items) {
+        if (item.type === 'writing') {
+          lastWritingUid = item.uid
+        } else if (lastWritingUid) {
+          item.sourceUid = lastWritingUid
+        }
+      }
+
       if (isMerge && streamRef.current.length > 0) {
-        // Insert a "merged header" + the loaded items above the current stream content
         const mergeHeader: StreamItem = {
+          uid: uid(),
           type: 'merged-header',
           content: data.entry.title || 'Past Entry',
           mergedFrom: data.entry.title,
           animating: true,
           waveDelay: 0,
         }
-
-        // Offset wave delays for merged items
         const mergedItems = items.map((item, i) => ({ ...item, waveDelay: (i + 1) * 80 }))
-
         s(prev => ({
           ...prev,
           stream: [mergeHeader, ...mergedItems, ...prev.stream],
           panelOpen: false,
           error: null,
           greetingVisible: false,
-          // Keep current entryId — we're adding context, not switching entries
         }))
-
-        // Scroll to the merged content (top)
-        setTimeout(() => {
-          window.scrollTo({ top: 0, behavior: 'smooth' })
-        }, 100)
+        setTimeout(() => { window.scrollTo({ top: 0, behavior: 'smooth' }) }, 100)
       } else {
-        // Full load — replace stream (sidebar click or first load)
-        // If there's existing content, exit-animate it first
         if (streamRef.current.length > 0) {
           exitingRef.current = true
           s(prev => ({
@@ -506,8 +913,6 @@ export default function Home() {
               exitDelay: i * 25,
             })),
           }))
-
-          // Wait for exit, then load new
           const exitDuration = Math.min(streamRef.current.length * 25, 300) + 400
           await new Promise(resolve => setTimeout(resolve, exitDuration))
           exitingRef.current = false
@@ -515,9 +920,8 @@ export default function Home() {
 
         allTextRef.current = items.filter(i => i.type === 'writing').map(i => i.content).join('\n\n')
         lastSentRef.current = allTextRef.current
-
         setInput('')
-        const fadeDuration = items.length * 80 + 400  // matches full waterfall duration
+        const fadeDuration = items.length * 80 + 400
         s({
           entryId,
           stream: items,
@@ -529,41 +933,45 @@ export default function Home() {
           streamFadeMs: fadeDuration,
         })
 
-        // Scroll to bottom AFTER waterfall animation completes
         const totalWaveDuration = items.length * 80 + 500
         setTimeout(() => {
           streamEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
           inputRef.current?.focus()
         }, totalWaveDuration)
       }
-
-      // No animation cleanup needed — 'forwards' fill-mode holds the final state
-      // Removing animating flags would cause a re-render flicker
     } catch {}
   }
 
   // ─── Continuation check ───
-  // ONLY runs on a BLANK canvas (no entryId, no stream items, first text input).
-  // Once we have an entryId or stream items, this never fires again.
   const checkContinuation = async (text: string) => {
     if (continuationCheckedRef.current || !text.trim()) return
     if (entryIdRef.current || streamRef.current.length > 0) {
-      // Already have an active entry or stream content — skip continuation check
       continuationCheckedRef.current = true
       s({ continuationChecked: true })
       return
     }
-    continuationCheckedRef.current = true  // set ref immediately to prevent double-fire
+    continuationCheckedRef.current = true
     s({ continuationChecked: true })
     try {
       const res = await fetch('/api/continuation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, model: modelRef.current }) })
       const data = await res.json()
       if (data.isContinuation && data.entryId) {
-        const items: StreamItem[] = (data.messages || []).map((m: any) => ({
-          id: m.id,
-          type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
-          content: m.content, tone: m.tone, linked_entry_id: m.linked_entry_id, tool_call: m.tool_call,
-        }))
+        const items: StreamItem[] = (data.messages || []).map((m: any) => {
+          const itemUid = uid()
+          return {
+            uid: itemUid,
+            id: m.id,
+            type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
+            content: m.content, tone: m.tone, linked_entry_id: m.linked_entry_id, tool_call: m.tool_call,
+            originalContent: m.sender === 'user' ? m.content : undefined,
+          }
+        })
+        // Link AI items
+        let lastWritingUid: string | null = null
+        for (const item of items) {
+          if (item.type === 'writing') lastWritingUid = item.uid
+          else if (lastWritingUid) item.sourceUid = lastWritingUid
+        }
         allTextRef.current = items.filter(i => i.type === 'writing').map(i => i.content).join('\n\n')
         lastSentRef.current = allTextRef.current
         s({ entryId: data.entryId, stream: items, entryTitle: data.entry?.title || null })
@@ -575,29 +983,23 @@ export default function Home() {
   // ═══════════════════════════════════════════
   // NON-BLOCKING SEND QUEUE
   // ═══════════════════════════════════════════
-  // User commits text → it goes to the queue → queue processes one at a time
-  // Textarea is NEVER disabled. User keeps writing while AI thinks.
 
   const enqueueMessage = (text: string, userRequested: boolean) => {
     if (!text.trim()) return
 
-    // ─── FIRST MESSAGE FIX: Force response when entryId is null and stream is empty ───
     const isFirstMessage = !entryIdRef.current && streamRef.current.length === 0
     const forceResponse = userRequested || isFirstMessage
 
-    // Once the user has sent a message, continuation check is done — lock it
     if (!continuationCheckedRef.current) {
       continuationCheckedRef.current = true
       s({ continuationChecked: true })
     }
 
-    // Commit the text as a writing block immediately
-    const writingItem: StreamItem = { type: 'writing', content: text }
+    const writingUid = uid()
+    const writingItem: StreamItem = { uid: writingUid, type: 'writing', content: text, originalContent: text, processing: true }
 
-    // Push to queue SYNCHRONOUSLY before setState — 
-    // setState callback is batched and may not run before processQueue reads the queue
-    const insertIdx = streamRef.current.length  // current stream length = index of new writing item
-    queueRef.current.push({ text, userRequested: forceResponse, insertIdx })
+    const insertIdx = streamRef.current.length
+    queueRef.current.push({ text, userRequested: forceResponse, insertIdx, writingUid })
 
     s(prev => ({
       ...prev,
@@ -609,7 +1011,6 @@ export default function Home() {
     setInput('')
     scrollToBottom()
 
-    // Start processing if not already running
     processQueue()
   }
 
@@ -620,16 +1021,15 @@ export default function Home() {
 
     while (queueRef.current.length > 0) {
       const job = queueRef.current.shift()!
-      await processOneMessage(job.text, job.userRequested, job.insertIdx)
+      await processOneMessage(job.text, job.userRequested, job.insertIdx, job.writingUid)
     }
 
     processingRef.current = false
     s({ busy: false })
   }
 
-  const processOneMessage = async (text: string, userRequested: boolean, originalInsertIdx: number) => {
+  const processOneMessage = async (text: string, userRequested: boolean, originalInsertIdx: number, writingUid: string) => {
     try {
-      // Build session context from current stream state
       const currentStream = streamRef.current
       const recentContext = currentStream.slice(-15).map(i => ({
         sender: i.type === 'writing' ? 'user' : 'ai',
@@ -649,6 +1049,14 @@ export default function Home() {
         }),
       })
 
+      // Mark writing block as done processing
+      s(prev => ({
+        ...prev,
+        stream: prev.stream.map(item =>
+          item.uid === writingUid ? { ...item, processing: false } : item
+        ),
+      }))
+
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Something went wrong' }))
         s({ error: err.error || 'Something went wrong' })
@@ -657,8 +1065,8 @@ export default function Home() {
 
       const data = await res.json()
 
-      // Build AI stream items with animation
       const aiItems: StreamItem[] = (data.responses || []).filter((r: any) => r.content?.trim()).map((r: any) => ({
+        uid: uid(),
         id: r.id,
         type: r.type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
         content: r.content,
@@ -666,28 +1074,27 @@ export default function Home() {
         linked_entry_id: r.linked_entry_id,
         animating: true,
         isNew: true,
+        sourceUid: writingUid,
       }))
 
       if (data.toolCall && aiItems.length > 0) {
         aiItems[aiItems.length - 1].tool_call = data.toolCall
       } else if (data.toolCall && aiItems.length === 0) {
-        aiItems.push({ type: 'ai-annotation', content: '', tool_call: data.toolCall, animating: true, isNew: true })
+        aiItems.push({ uid: uid(), type: 'ai-annotation', content: '', tool_call: data.toolCall, animating: true, isNew: true, sourceUid: writingUid })
       }
 
-      // Only insert if there are items to insert
       if (aiItems.length > 0) {
         s(prev => {
           const newStream = [...prev.stream]
-          // Find where this writing block ended up (it may have shifted if earlier items were inserted)
-          // We search for the writing block with matching content near the original index
-          let insertAt = Math.min(originalInsertIdx + 1, newStream.length)
-          // Scan from original position to find a good insertion point after the matching writing block
-          for (let i = Math.max(0, originalInsertIdx - 2); i < Math.min(newStream.length, originalInsertIdx + 5); i++) {
-            if (newStream[i]?.type === 'writing' && newStream[i]?.content === text) {
-              insertAt = i + 1
-              break
-            }
+          // Find the writing block by uid
+          const writingIdx = newStream.findIndex(i => i.uid === writingUid)
+          let insertAt = writingIdx >= 0 ? writingIdx + 1 : newStream.length
+
+          // Skip past any existing AI items for this writing block
+          while (insertAt < newStream.length && newStream[insertAt]?.sourceUid === writingUid) {
+            insertAt++
           }
+
           newStream.splice(insertAt, 0, ...aiItems)
           return {
             ...prev,
@@ -697,10 +1104,7 @@ export default function Home() {
           }
         })
         scrollToBottom()
-
-        // No animation cleanup needed — 'forwards' fill-mode holds the final state
       } else {
-        // No AI responses, still update entry metadata
         s(prev => ({
           ...prev,
           entryId: data.entryId,
@@ -710,21 +1114,24 @@ export default function Home() {
 
       lastSentRef.current = allTextRef.current
 
-      // Handle load_entry tool: MERGE into current thread
       if (data.toolCall?.type === 'load_entry' && data.toolCall?.data?.entry_id) {
         setTimeout(() => loadEntry(data.toolCall.data.entry_id, true), 400)
       }
     } catch {
       s({ error: 'Network error — check your connection' })
+      // Clear processing state on error
+      s(prev => ({
+        ...prev,
+        stream: prev.stream.map(item =>
+          item.uid === writingUid ? { ...item, processing: false } : item
+        ),
+      }))
     }
   }
 
   // ═══════════════════════════════════════════
   // SMART AUTO-SEND
   // ═══════════════════════════════════════════
-  // Don't send on every keystroke or pause.
-  // Detect real paragraph endings: double-Enter, sentence ending after 5+ seconds, long writing stretch after 10 seconds.
-  // Track writing velocity — if user is actively typing, never interrupt.
 
   const lastKeystrokeRef = useRef<number>(Date.now())
   const wordCountAtLastSendRef = useRef(0)
@@ -744,33 +1151,24 @@ export default function Home() {
     const wordCount = trimmed.split(/\s+/).length
     const wordsSinceLastSend = wordCount - wordCountAtLastSendRef.current
 
-    // Conditions for auto-send:
-    // 1. Sentence ends + at least 8 words of new content + 5 second pause
-    // 2. Long writing stretch (20+ new words) + 10 second pause (any punctuation)
-    // 3. Very long stretch (40+ words) + 12 second pause (regardless)
-    // On all: must wait for actual pause (no new keystrokes)
-
     let delay: number
     if (endsSentence && wordsSinceLastSend >= 8) {
-      delay = 5000  // 5s pause after a sentence with decent content
+      delay = 5000
     } else if (wordsSinceLastSend >= 20 && endsSentence) {
-      delay = 8000  // 8s for long stretches that end on a sentence
+      delay = 8000
     } else if (wordsSinceLastSend >= 40) {
-      delay = 12000  // 12s for very long unbroken writing
+      delay = 12000
     } else {
-      // Not enough content yet — don't auto-send
       return
     }
 
     autoTimerRef.current = setTimeout(() => {
-      // Check that user hasn't typed in the last N seconds (actual pause)
       const timeSinceLastKeystroke = Date.now() - lastKeystrokeRef.current
-      if (timeSinceLastKeystroke < delay - 500) return  // They typed recently — not a real pause
+      if (timeSinceLastKeystroke < delay - 500) return
 
       const current = inputRef.current?.value?.trim() || ''
       if (current && !processingRef.current) {
         wordCountAtLastSendRef.current = current.split(/\s+/).length
-        // First message in a session always gets a response (not silent)
         const isFirstMessage = !entryIdRef.current && streamRef.current.length === 0
         enqueueMessage(current, isFirstMessage)
       }
@@ -782,21 +1180,18 @@ export default function Home() {
     setInput(val)
     lastKeystrokeRef.current = Date.now()
     if (state.greetingVisible && val.trim()) s({ greetingVisible: false })
-    // Only check continuation on a BLANK canvas (no entryId, no stream, first text)
     if (!continuationCheckedRef.current && !entryIdRef.current && streamRef.current.length === 0 && val.trim().split(/\s+/).length >= 4) {
       checkContinuation(val.trim())
     }
     startAutoTrigger(val)
   }
 
-  // ─── Manual send (Ctrl+Enter / Shift+Enter / button) ───
+  // ─── Manual send ───
   const manualSend = () => {
     resetAutoTrigger()
-    // ALWAYS read from the DOM ref first — React state may be stale due to batching
     const text = (inputRef.current?.value ?? '').trim() || input.trim()
     if (!text) return
     wordCountAtLastSendRef.current = 0
-    // Manual sends always request a response (true), first-message logic handled in enqueue
     enqueueMessage(text, true)
   }
 
@@ -807,6 +1202,11 @@ export default function Home() {
       inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 300) + 'px'
     }
   }, [input])
+
+  // ─── Import callback ───
+  const onImported = (entryId: string) => {
+    loadEntry(entryId)
+  }
 
   // ─── Render ───
   if (state.loading) {
@@ -829,12 +1229,16 @@ export default function Home() {
     <div id="app" onClick={focusInput}>
       {/* Top Bar */}
       <div id="topbar" onClick={e => e.stopPropagation()}>
-        <button className="tbtn" onClick={newEntry} title="New entry">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-        </button>
+        <div className="topbar-left">
+          <button className="tbtn" onClick={newEntry} title="New entry">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+          </button>
+          <button className="tbtn" onClick={() => s({ importOpen: true })} title="Import conversation">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+          </button>
+        </div>
         {state.entryTitle && <div className="topbar-title">{state.entryTitle}</div>}
 
-        {/* ═══ THINKING INDICATOR — top center, non-disruptive ═══ */}
         {state.busy && (
           <div className="topbar-thinking">
             <span className="t-dot-sm" /><span className="t-dot-sm" /><span className="t-dot-sm" />
@@ -842,7 +1246,6 @@ export default function Home() {
         )}
 
         <div className="topbar-right">
-          {/* Model Picker — grouped dropdown */}
           <div className="model-picker-wrap" onClick={e => e.stopPropagation()}>
             <button className="tbtn model-btn" onClick={() => s({ modelPickerOpen: !state.modelPickerOpen })} title="Change AI model">
               <span className="model-badge">{(state.models.find(m => m.id === state.model) || { label: 'Haiku' }).label}</span>
@@ -855,7 +1258,6 @@ export default function Home() {
                   const openaiModels = available.filter(m => m.provider === 'openai')
 
                   if (available.length === 0) {
-                    // Fallback when models haven't loaded
                     return (
                       <>
                         <div className="model-group-label">Claude</div>
@@ -894,9 +1296,7 @@ export default function Home() {
                           ))}
                         </>
                       )}
-                      {anthropicModels.length > 0 && openaiModels.length > 0 && (
-                        <div className="model-group-divider" />
-                      )}
+                      {anthropicModels.length > 0 && openaiModels.length > 0 && <div className="model-group-divider" />}
                       {openaiModels.length > 0 && (
                         <>
                           <div className="model-group-label">GPT</div>
@@ -931,13 +1331,10 @@ export default function Home() {
         <div className="greeting-hint">Tap anywhere to begin writing</div>
       </div>
 
-      {/* Canvas — the journal page with interleaved writing and AI */}
+      {/* Canvas */}
       <div id="canvas">
         <div id="stream" className={state.streamFadeMs > 0 ? 'stream-fade' : ''} style={state.streamFadeMs > 0 ? { animationDuration: `${state.streamFadeMs}ms` } as React.CSSProperties : undefined}>
           {state.stream.map((item, i) => {
-            // Wave-in items: 'both' fill-mode applies opacity:0 during the delay
-            // period (backwards) and holds opacity:1 after completion (forwards)
-            // No cleanup needed — flags stay forever, animation is inert after finish
             const waveStyle = item.animating && item.waveDelay != null
               ? { animationDelay: `${item.waveDelay}ms` } as React.CSSProperties
               : item.animating
@@ -950,10 +1347,10 @@ export default function Home() {
 
             const animClass = item.exiting ? 'stream-exit' : item.animating ? 'wave-in' : ''
 
-            // Merged header — shows when a past entry was pulled into the thread
+            // Merged header
             if (item.type === 'merged-header') {
               return (
-                <div key={`merge-${i}`} className={`si-merge-header ${animClass}`} style={item.exiting ? exitStyle : waveStyle}>
+                <div key={item.uid} className={`si-merge-header ${animClass}`} style={item.exiting ? exitStyle : waveStyle}>
                   <div className="merge-line" />
                   <span className="merge-label">{item.content}</span>
                   <div className="merge-line" />
@@ -961,37 +1358,97 @@ export default function Home() {
               )
             }
 
+            // Writing block — editable
             if (item.type === 'writing') {
-              return <div key={i} className={`si-writing ${animClass}`} style={item.exiting ? exitStyle : waveStyle}>{item.content}</div>
-            }
-            if (item.type === 'ai-annotation') {
-              // isNew = live AI response → use si-inserting (slide in)
-              // !isNew = loaded from past entry → use wave-in (simple fade)
-              const aiAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'si-inserting' : 'wave-in') : ''
+              const hasAiResponse = state.stream.some(s => s.sourceUid === item.uid)
+              const isProcessing = item.processing
+
               return (
-                <div key={item.id || i} className={`si-annotation ${aiAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
+                <div key={item.uid} className={`si-writing-wrap ${item.exiting ? 'stream-exit' : ''} ${item.animating ? (item.waveDelay != null ? 'wave-in' : '') : ''}`} style={item.exiting ? exitStyle : waveStyle}>
+                  <WritingBlock
+                    item={item}
+                    onEdit={(newContent) => handleWritingEdit(item.uid, newContent)}
+                    onClick={e => e.stopPropagation()}
+                  />
+                  {isProcessing && (
+                    <div className="writing-processing">
+                      <div className="processing-line" />
+                    </div>
+                  )}
+                </div>
+              )
+            }
+
+            // Image block
+            if (item.type === 'image') {
+              const imgAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'si-inserting' : 'wave-in') : ''
+              return (
+                <div key={item.uid} className={`si-image-wrap ${imgAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
+                  <InlineImage
+                    item={item}
+                    onResize={(w) => handleImageResize(item.uid, w)}
+                    onChangeFloat={(f) => handleImageFloat(item.uid, f)}
+                    onRemove={() => handleImageRemove(item.uid)}
+                  />
+                </div>
+              )
+            }
+
+            // AI Annotation
+            if (item.type === 'ai-annotation') {
+              const aiAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'si-inserting' : 'wave-in') : ''
+              const sourceEdited = item.editedSinceProcess
+              return (
+                <div key={item.uid} className={`si-annotation ${aiAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
+                  {/* Separator line that draws in */}
+                  {item.isNew && <div className="ai-separator"><div className="ai-separator-line" /></div>}
                   <div className="anno-bar" />
                   <div className="anno-body">
                     {item.content && <div className="anno-text">{item.content}</div>}
                     {item.linked_entry_id && <span className="anno-link" onClick={() => loadEntry(item.linked_entry_id!, true)}>see related entry</span>}
                     {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={(id) => loadEntry(id, true)} />}
+                    {sourceEdited && item.sourceUid && (
+                      <button className="redo-btn" onClick={() => handleRedo(item.sourceUid!)}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
+                        <span>Reprocess</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )
             }
-            // ai-conversational
+
+            // AI Conversational
             const convAnimClass = item.exiting ? 'stream-exit' : item.animating ? (item.isNew ? 'si-inserting' : 'wave-in') : ''
+            const sourceEdited = item.editedSinceProcess
             return (
-              <div key={item.id || i} className={`si-conv ${convAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
+              <div key={item.uid} className={`si-conv ${convAnimClass}`} onClick={e => e.stopPropagation()} style={item.exiting ? exitStyle : waveStyle}>
+                {item.isNew && <div className="ai-separator"><div className="ai-separator-line" /></div>}
                 <div className="conv-text">{item.content}</div>
                 {item.tool_call && <ToolRender toolCall={item.tool_call} messageId={item.id} onLoadEntry={(id) => loadEntry(id, true)} />}
+                {sourceEdited && item.sourceUid && (
+                  <button className="redo-btn" onClick={() => handleRedo(item.sourceUid!)}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
+                    <span>Reprocess</span>
+                  </button>
+                )}
               </div>
             )
           })}
         </div>
 
-        {/* Live input — always at the bottom of the stream, NEVER disabled */}
-        <div id="writing-input" onClick={e => e.stopPropagation()}>
+        {/* Live input — always at the bottom, NEVER disabled */}
+        <div id="writing-input" onClick={e => e.stopPropagation()}
+          onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('drag-over') }}
+          onDragLeave={e => { e.currentTarget.classList.remove('drag-over') }}
+          onDrop={e => {
+            e.preventDefault()
+            e.currentTarget.classList.remove('drag-over')
+            const files = Array.from(e.dataTransfer.files)
+            const imageFile = files.find(f => f.type.startsWith('image/'))
+            if (imageFile) uploadImage(imageFile)
+          }}
+        >
           <textarea
             ref={inputRef}
             id="tinput"
@@ -1002,6 +1459,15 @@ export default function Home() {
             onKeyDown={e => {
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); manualSend() }
               if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); manualSend() }
+            }}
+            onPaste={e => {
+              const items = Array.from(e.clipboardData?.items || [])
+              const imageItem = items.find(item => item.type.startsWith('image/'))
+              if (imageItem) {
+                e.preventDefault()
+                const file = imageItem.getAsFile()
+                if (file) uploadImage(file)
+              }
             }}
             autoFocus
           />
@@ -1027,6 +1493,7 @@ export default function Home() {
       )}
 
       <SidePanel open={state.panelOpen} onClose={() => s({ panelOpen: false })} onLoadEntry={(id) => loadEntry(id)} onDeleteEntry={onDeleteEntry} />
+      <ImportPanel open={state.importOpen} onClose={() => s({ importOpen: false })} onImported={onImported} />
 
       <style jsx global>{styles}</style>
     </div>
@@ -1158,6 +1625,7 @@ body {
 
 /* ═══ Top Bar ═══ */
 #topbar { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; z-index: 100; padding-top: max(12px, env(safe-area-inset-top)); background: linear-gradient(to bottom, var(--bg) 60%, transparent); cursor: default; }
+.topbar-left { display: flex; gap: 2px; align-items: center; }
 .topbar-title { flex: 1; text-align: center; font-family: 'DM Sans', sans-serif; font-size: 0.7rem; color: var(--text-light); letter-spacing: 0.04em; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; animation: titleFade 0.4s ease; }
 @keyframes titleFade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 .topbar-right { display: flex; gap: 2px; align-items: center; }
@@ -1170,93 +1638,37 @@ body {
 .model-btn { opacity: 0.5 !important; padding: 6px 10px !important; }
 .model-btn:hover { opacity: 0.8 !important; }
 .model-badge {
-  font-family: 'DM Sans', sans-serif;
-  font-size: 0.62rem;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  background: var(--tag-bg);
-  padding: 3px 8px;
-  border-radius: 6px;
-  white-space: nowrap;
+  font-family: 'DM Sans', sans-serif; font-size: 0.62rem; font-weight: 500;
+  letter-spacing: 0.04em; color: var(--text-muted); background: var(--tag-bg);
+  padding: 3px 8px; border-radius: 6px; white-space: nowrap;
 }
 .model-dropdown {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-  background: var(--panel-bg);
-  border: 1px solid var(--divider);
-  border-radius: 14px;
-  padding: 6px;
-  min-width: 180px;
-  box-shadow: 0 12px 40px var(--shadow-md), 0 2px 8px var(--shadow);
-  z-index: 150;
-  animation: dropdownIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-  transform-origin: top right;
+  position: absolute; top: 100%; right: 0; margin-top: 4px;
+  background: var(--panel-bg); border: 1px solid var(--divider); border-radius: 14px;
+  padding: 6px; min-width: 180px; box-shadow: 0 12px 40px var(--shadow-md), 0 2px 8px var(--shadow);
+  z-index: 150; animation: dropdownIn 0.25s cubic-bezier(0.16, 1, 0.3, 1); transform-origin: top right;
 }
 @keyframes dropdownIn {
   from { opacity: 0; transform: scale(0.95) translateY(-4px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
-.model-group-label {
-  font-family: 'DM Sans', sans-serif;
-  font-size: 0.58rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-light);
-  padding: 8px 10px 4px;
-}
-.model-group-divider {
-  height: 1px;
-  background: var(--divider);
-  margin: 4px 8px;
-}
-.model-opt {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 9px 12px;
-  border: none;
-  background: none;
-  cursor: pointer;
-  border-radius: 10px;
-  transition: background 0.15s, transform 0.1s;
-  text-align: left;
-}
+.model-group-label { font-family: 'DM Sans', sans-serif; font-size: 0.58rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-light); padding: 8px 10px 4px; }
+.model-group-divider { height: 1px; background: var(--divider); margin: 4px 8px; }
+.model-opt { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px; border: none; background: none; cursor: pointer; border-radius: 10px; transition: background 0.15s, transform 0.1s; text-align: left; }
 .model-opt:hover { background: var(--hover-bg); }
 .model-opt:active { transform: scale(0.98); }
 .model-opt.active { background: var(--accent-bg); }
 .model-opt-label { font-family: 'DM Sans', sans-serif; font-size: 0.82rem; color: var(--text); flex: 1; }
-.model-opt-provider { font-family: 'DM Sans', sans-serif; font-size: 0.62rem; color: var(--text-light); text-transform: uppercase; letter-spacing: 0.04em; }
 .model-check { color: var(--accent); font-size: 0.72rem; font-weight: 600; }
 
-/* ═══ Thinking Indicator — top center ═══ */
+/* ═══ Thinking Indicator ═══ */
 .topbar-thinking {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  padding: 4px 12px;
-  border-radius: 20px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--divider);
-  animation: thinkFade 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-  z-index: 1;
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  display: flex; gap: 4px; align-items: center; padding: 4px 12px;
+  border-radius: 20px; background: var(--bg-secondary); border: 1px solid var(--divider);
+  animation: thinkFade 0.35s cubic-bezier(0.16, 1, 0.3, 1); z-index: 1;
 }
-.t-dot-sm {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--accent);
-  opacity: 0.3;
-  animation: breathe 1.4s ease infinite;
-}
+.t-dot-sm { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: 0.3; animation: breathe 1.4s ease infinite; }
 .t-dot-sm:nth-child(2) { animation-delay: 0.2s; }
 .t-dot-sm:nth-child(3) { animation-delay: 0.4s; }
 @keyframes thinkFade { from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
@@ -1267,35 +1679,76 @@ body {
 #stream.stream-fade { animation: streamFadeIn ease both; }
 @keyframes streamFadeIn { 0% { opacity: 0; } 100% { opacity: 1; } }
 
-/* ═══ Stream Items — INLINE ═══ */
+/* ═══ Stream Items ═══ */
 
-/* User writing — looks like text on a page */
+/* Writing block wrapper */
+.si-writing-wrap { position: relative; }
+.si-writing-wrap.wave-in { animation: waterfallIn 0.4s ease both; }
+.si-writing-wrap.stream-exit { animation: streamExit 0.35s ease forwards; }
+
+/* Editable writing block */
+.si-writing-editable {
+  padding: 0 0 4px; white-space: pre-wrap; word-break: break-word;
+  outline: none; border: none; min-height: 1.8em;
+  border-radius: 4px; margin: 0 -4px; padding-left: 4px; padding-right: 4px;
+  transition: background 0.25s ease;
+  caret-color: var(--accent);
+}
+.si-writing-editable:focus {
+  background: var(--bg-secondary);
+}
+
+/* Processing indicator — animated line under writing block */
+.writing-processing {
+  height: 2px; margin: 4px 0 8px; overflow: hidden;
+  animation: processingFadeIn 0.3s ease;
+}
+.processing-line {
+  height: 100%; width: 100%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: processingSlide 1.8s ease-in-out infinite;
+  border-radius: 1px;
+}
+@keyframes processingSlide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+@keyframes processingFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* AI Separator line — draws in elegantly before response */
+.ai-separator {
+  margin: 6px 0 2px;
+  overflow: hidden;
+  height: 1px;
+}
+.ai-separator-line {
+  height: 100%;
+  background: var(--divider);
+  animation: separatorDraw 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: left;
+}
+@keyframes separatorDraw {
+  0% { transform: scaleX(0); opacity: 0; }
+  30% { opacity: 0.5; }
+  100% { transform: scaleX(1); opacity: 1; }
+}
+
+/* User writing — non-editable fallback (loaded from past) */
 .si-writing { padding: 0 0 4px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.15s ease; }
 .si-writing.wave-in { animation: waterfallIn 0.4s ease both; }
 .si-writing.stream-exit { animation: streamExit 0.35s ease forwards; }
 
-/* Merged header — divider when a past entry is pulled into the thread */
-.si-merge-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 20px 0 16px;
-  cursor: default;
-}
+/* Merged header */
+.si-merge-header { display: flex; align-items: center; gap: 12px; margin: 20px 0 16px; cursor: default; }
 .si-merge-header.wave-in { animation: waterfallIn 0.4s ease both; }
 .si-merge-header.stream-exit { animation: streamExit 0.35s ease forwards; }
 .merge-line { flex: 1; height: 1px; background: var(--divider); }
-.merge-label {
-  font-family: 'DM Sans', sans-serif;
-  font-size: 0.65rem;
-  color: var(--text-light);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  padding: 2px 0;
-}
+.merge-label { font-family: 'DM Sans', sans-serif; font-size: 0.65rem; color: var(--text-light); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; padding: 2px 0; }
 
-/* AI Annotation — margin note with accent bar, inline in the flow */
+/* AI Annotation */
 .si-annotation { display: flex; gap: 0; margin: 8px 0 12px; cursor: default; }
 .si-annotation.wave-in { animation: waterfallIn 0.4s ease both; }
 .si-annotation:not(.si-inserting):not(.stream-exit):not(.wave-in) { animation: aiFade 0.4s ease; }
@@ -1306,19 +1759,19 @@ body {
 .anno-link { font-family: 'DM Sans', sans-serif; font-size: 0.68rem; color: var(--accent); cursor: pointer; margin-top: 4px; display: inline-block; text-decoration: underline; text-underline-offset: 2px; opacity: 0.8; }
 .anno-link:hover { opacity: 1; }
 
-/* AI Conversational — gentle inline note */
+/* AI Conversational */
 .si-conv { margin: 10px 0 14px; padding: 14px 18px; background: var(--conv-bg); border-radius: 12px; cursor: default; font-size: 0.92rem; line-height: 1.65; }
 .si-conv.wave-in { animation: waterfallIn 0.4s ease both; }
 .si-conv:not(.si-inserting):not(.stream-exit):not(.wave-in) { animation: aiFade 0.4s ease; }
 .si-conv.stream-exit { animation: streamExit 0.35s ease forwards; }
 
-/* ═══ Insertion Animation — AI slides in elegantly ═══ */
+/* ═══ Insertion Animation — AI slides in with height reveal ═══ */
 .si-inserting {
-  animation: insertSlide 0.65s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: insertReveal 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   transform-origin: top;
 }
 
-@keyframes insertSlide {
+@keyframes insertReveal {
   0% {
     opacity: 0;
     max-height: 0;
@@ -1326,28 +1779,52 @@ body {
     margin-bottom: 0;
     padding-top: 0;
     padding-bottom: 0;
-    transform: translateY(-10px) scale(0.97);
+    transform: translateY(-8px);
     overflow: hidden;
   }
-  50% {
-    opacity: 0.5;
-    max-height: 500px;
+  40% {
+    opacity: 0.3;
+    max-height: 200px;
     overflow: hidden;
+  }
+  70% {
+    opacity: 0.7;
+    max-height: 600px;
   }
   100% {
     opacity: 1;
     max-height: 2000px;
-    transform: translateY(0) scale(1);
+    transform: translateY(0);
   }
 }
 
-/* ═══ Waterfall-in — pure opacity cascade, no layout shift ═══ */
+/* ═══ Redo Button ═══ */
+.redo-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 8px; padding: 4px 10px;
+  background: var(--accent-bg); border: 1px solid var(--accent-light);
+  border-radius: 8px; cursor: pointer;
+  font-family: 'DM Sans', sans-serif; font-size: 0.68rem;
+  color: var(--accent); letter-spacing: 0.02em;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: redoAppear 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.redo-btn:hover {
+  background: var(--accent); color: white; border-color: var(--accent);
+  transform: translateY(-1px); box-shadow: 0 2px 8px rgba(196,119,90,0.2);
+}
+.redo-btn:active { transform: scale(0.96); }
+.redo-btn svg { flex-shrink: 0; }
+@keyframes redoAppear {
+  from { opacity: 0; transform: translateY(4px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ═══ Waterfall & Exit Animations ═══ */
 @keyframes waterfallIn {
   0% { opacity: 0; }
   100% { opacity: 1; }
 }
-
-/* ═══ Stream exit — pure fade out ═══ */
 @keyframes streamExit {
   0% { opacity: 1; }
   100% { opacity: 0; }
@@ -1366,7 +1843,7 @@ body {
 }
 #tinput::placeholder { color: var(--text-light); opacity: 0.35; font-style: italic; }
 
-/* ═══ Thinking (panel/loading only) ═══ */
+/* ═══ Thinking ═══ */
 .thinking { display: flex; gap: 5px; padding: 8px 2px; }
 .t-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: 0.25; animation: breathe 1.4s ease infinite; }
 .t-dot:nth-child(2) { animation-delay: 0.2s; }
@@ -1452,6 +1929,141 @@ body {
 .ecard-del:hover { opacity: 0.7; color: var(--error-bg); }
 .ecard-del.confirming { opacity: 1; color: var(--error-bg); background: rgba(192,57,43,0.1); }
 
+/* ═══ Inline Image ═══ */
+.si-image-wrap { margin: 8px 0; clear: both; }
+.si-image-wrap::after { content: ''; display: table; clear: both; }
+.si-image {
+  position: relative; border-radius: 8px; overflow: visible;
+  cursor: default; transition: box-shadow 0.25s ease;
+  margin: 0 auto;
+}
+.si-image:hover { box-shadow: 0 2px 16px var(--shadow-md); }
+.si-image.resizing { user-select: none; }
+.si-image img {
+  width: 100%; height: auto; display: block; border-radius: 8px;
+  pointer-events: none; transition: border-radius 0.2s;
+}
+
+/* Float positioning */
+.si-image.img-float-none { display: block; margin: 0 auto; }
+.si-image.img-float-left { float: left; margin: 0 16px 8px 0; }
+.si-image.img-float-right { float: right; margin: 0 0 8px 16px; }
+
+/* Resize handle */
+.img-resize-handle {
+  position: absolute; right: -4px; top: 0; bottom: 0; width: 10px;
+  cursor: ew-resize; background: transparent;
+  transition: background 0.2s;
+}
+.img-resize-handle:hover, .si-image.resizing .img-resize-handle {
+  background: linear-gradient(90deg, transparent, var(--accent) 40%, var(--accent) 60%, transparent);
+  opacity: 0.5; border-radius: 4px;
+}
+
+/* Controls overlay */
+.img-controls {
+  position: absolute; top: -36px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 2px; padding: 4px;
+  background: var(--panel-bg); border: 1px solid var(--divider);
+  border-radius: 10px; box-shadow: 0 4px 16px var(--shadow-md);
+  opacity: 0; pointer-events: none; transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+}
+.img-controls.visible { opacity: 1; pointer-events: all; transform: translateX(-50%) translateY(0); }
+.img-ctrl-btn {
+  width: 28px; height: 28px; border: none; background: none; border-radius: 6px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted); transition: all 0.15s;
+}
+.img-ctrl-btn:hover { background: var(--hover-bg); color: var(--text); }
+.img-ctrl-btn.active { background: var(--accent-bg); color: var(--accent); }
+.img-ctrl-btn.img-ctrl-delete:hover { background: rgba(192,57,43,0.1); color: var(--error-bg); }
+.img-ctrl-divider { width: 1px; background: var(--divider); margin: 2px 2px; }
+
+/* Drag-over state for writing input */
+#writing-input.drag-over {
+  background: var(--accent-bg);
+  border: 2px dashed var(--accent-light);
+  border-radius: 12px;
+  transition: all 0.2s ease;
+}
+
+/* ═══ Import Panel ═══ */
+.import-panel {
+  position: fixed; top: 0; right: -480px; width: 440px; max-width: 95vw; height: 100dvh;
+  background: var(--panel-bg); border-left: 1px solid var(--panel-border); z-index: 201;
+  transition: right 0.45s cubic-bezier(0.16,1,0.3,1); overflow-y: auto;
+  -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; cursor: default;
+}
+.import-panel.open { right: 0; }
+.import-body { flex: 1; overflow-y: auto; padding: 20px; }
+.import-desc {
+  font-family: 'DM Sans', sans-serif; font-size: 0.82rem; color: var(--text-muted);
+  line-height: 1.5; margin-bottom: 16px;
+}
+.import-input-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.import-url-input {
+  flex: 1; border: 1px solid var(--input-border); border-radius: 10px;
+  padding: 10px 14px; font-family: 'DM Sans', sans-serif; font-size: 0.82rem;
+  background: var(--bg); color: var(--text); outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.import-url-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(196,119,90,0.08); }
+.import-url-input::placeholder { color: var(--text-light); }
+.import-fetch-btn {
+  padding: 10px 18px; border-radius: 10px; border: none;
+  background: var(--accent); color: white; cursor: pointer;
+  font-family: 'DM Sans', sans-serif; font-size: 0.8rem; font-weight: 500;
+  transition: all 0.2s; white-space: nowrap;
+  display: flex; align-items: center; justify-content: center;
+}
+.import-fetch-btn:hover { background: #b86a4f; }
+.import-fetch-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.import-error {
+  font-family: 'DM Sans', sans-serif; font-size: 0.78rem; color: var(--error-bg);
+  padding: 8px 12px; background: rgba(192,57,43,0.06); border-radius: 8px;
+  margin-bottom: 12px; animation: fadeUp 0.2s ease;
+}
+.import-preview {
+  border: 1px solid var(--divider); border-radius: 14px; padding: 16px;
+  animation: fadeUp 0.3s ease;
+}
+.import-preview-title {
+  font-size: 1rem; font-weight: 500; color: var(--text); margin-bottom: 4px;
+}
+.import-preview-count {
+  font-family: 'DM Sans', sans-serif; font-size: 0.72rem; color: var(--text-muted);
+  margin-bottom: 14px;
+}
+.import-preview-msgs {
+  max-height: 300px; overflow-y: auto; margin-bottom: 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.import-msg {
+  padding: 8px 12px; border-radius: 8px; font-size: 0.82rem; line-height: 1.5;
+}
+.import-msg.user { background: var(--bg-secondary); }
+.import-msg.assistant { background: var(--conv-bg); }
+.import-msg-role {
+  font-family: 'DM Sans', sans-serif; font-size: 0.62rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-light);
+  display: block; margin-bottom: 3px;
+}
+.import-msg-text { color: var(--text-muted); font-size: 0.8rem; }
+.import-more {
+  font-family: 'DM Sans', sans-serif; font-size: 0.72rem; color: var(--text-light);
+  text-align: center; padding: 6px;
+}
+.import-save-btn {
+  width: 100%; padding: 12px; border-radius: 10px; border: none;
+  background: var(--accent); color: white; cursor: pointer;
+  font-family: 'DM Sans', sans-serif; font-size: 0.82rem; font-weight: 500;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  transition: all 0.2s;
+}
+.import-save-btn:hover { background: #b86a4f; }
+.import-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* ═══ Mobile ═══ */
 @media (max-width: 680px) {
   body { font-size: 16px; }
@@ -1462,6 +2074,7 @@ body {
   #topbar { padding: 10px 12px; padding-top: max(10px, env(safe-area-inset-top)); }
   .tbtn { padding: 12px; }
   .panel { width: 88vw; }
+  .import-panel { width: 95vw; }
   .p-body { padding: 16px; }
   .fgrp { margin-bottom: 16px; }
   .tool-chart { max-height: 180px; }
