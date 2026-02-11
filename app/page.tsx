@@ -228,10 +228,12 @@ function ImportPanel({ open, onClose, onImported }: { open: boolean; onClose: ()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<any>(null)
+  const [importing, setImporting] = useState(false)
+  const [success, setSuccess] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    if (open) { setUrl(''); setError(''); setPreview(null); setTimeout(() => inputRef.current?.focus(), 200) }
+    if (open) { setUrl(''); setError(''); setPreview(null); setSuccess(false); setImporting(false); setTimeout(() => inputRef.current?.focus(), 250) }
   }, [open])
 
   const handleFetch = async () => {
@@ -249,14 +251,14 @@ function ImportPanel({ open, onClose, onImported }: { open: boolean; onClose: ()
       if (!res.ok) { setError(data.error || 'Failed to fetch conversation'); setLoading(false); return }
       setPreview(data)
     } catch {
-      setError('Connection error — check your network')
+      setError('Could not reach the server. Check your connection and try again.')
     }
     setLoading(false)
   }
 
   const handleImport = async () => {
     if (!preview) return
-    setLoading(true)
+    setImporting(true)
     setError('')
     try {
       const res = await fetch('/api/import/save', {
@@ -265,13 +267,16 @@ function ImportPanel({ open, onClose, onImported }: { open: boolean; onClose: ()
         body: JSON.stringify({ url: url.trim(), messages: preview.messages, title: preview.title }),
       })
       const data = await res.json()
-      if (!res.ok) { setError(data.error || 'Failed to import'); setLoading(false); return }
-      onImported(data.entryId)
-      onClose()
+      if (!res.ok) { setError(data.error || 'Failed to import'); setImporting(false); return }
+      setSuccess(true)
+      setTimeout(() => {
+        onImported(data.entryId)
+        onClose()
+      }, 800)
     } catch {
-      setError('Connection error')
+      setError('Connection lost during import. Your data is safe — try again.')
     }
-    setLoading(false)
+    setImporting(false)
   }
 
   return (
@@ -293,14 +298,33 @@ function ImportPanel({ open, onClose, onImported }: { open: boolean; onClose: ()
               value={url}
               onChange={e => setUrl(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleFetch() }}
-              disabled={loading}
+              disabled={loading || importing}
             />
-            <button className="import-fetch-btn" onClick={handleFetch} disabled={loading || !url.trim()}>
+            <button className="import-fetch-btn" onClick={handleFetch} disabled={loading || !url.trim() || importing}>
               {loading && !preview ? <svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> : 'Fetch'}
             </button>
           </div>
-          {error && <div className="import-error">{error}</div>}
-          {preview && (
+
+          {error && <div className="import-error"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0}}><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg><span>{error}</span></div>}
+
+          {/* Loading skeleton */}
+          {loading && !preview && (
+            <div className="import-skeleton">
+              <div className="skel-line skel-title" />
+              <div className="skel-line skel-count" />
+              <div className="skel-msg" /><div className="skel-msg skel-msg-alt" /><div className="skel-msg" />
+            </div>
+          )}
+
+          {/* Success state */}
+          {success && (
+            <div className="import-success">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></svg>
+              <span>Imported successfully</span>
+            </div>
+          )}
+
+          {preview && !success && (
             <div className="import-preview">
               <div className="import-preview-title">{preview.title || 'Untitled Conversation'}</div>
               <div className="import-preview-count">{preview.messages?.length || 0} messages found</div>
@@ -315,8 +339,8 @@ function ImportPanel({ open, onClose, onImported }: { open: boolean; onClose: ()
                   <div className="import-more">+{preview.messages.length - 6} more messages</div>
                 )}
               </div>
-              <button className="import-save-btn" onClick={handleImport} disabled={loading}>
-                {loading ? <><svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> Importing...</> : `Import ${preview.messages?.length || 0} messages`}
+              <button className="import-save-btn" onClick={handleImport} disabled={importing}>
+                {importing ? <><svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> Importing...</> : `Import ${preview.messages?.length || 0} messages`}
               </button>
             </div>
           )}
@@ -378,10 +402,10 @@ function SidePanel({ open, onClose, onLoadEntry, onDeleteEntry }: { open: boolea
               {Object.entries(grouped).map(([folder, ents]) => (
                 <div key={folder} className="fgrp">
                   <div className="fname"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>{folder}</div>
-                  {ents.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}
+                  {ents.map((e, i) => <EntryCard key={e.id} entry={e} index={i} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}
                 </div>
               ))}
-              {uncategorized.length > 0 && <div className="fgrp"><div className="fname">Uncategorized</div>{uncategorized.map(e => <EntryCard key={e.id} entry={e} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}</div>}
+              {uncategorized.length > 0 && <div className="fgrp"><div className="fname">Uncategorized</div>{uncategorized.map((e, i) => <EntryCard key={e.id} entry={e} index={i} onClick={() => { onLoadEntry(e.id); onClose() }} onDelete={() => confirmDelete === e.id ? doDelete(e.id) : setConfirmDelete(e.id)} confirming={confirmDelete === e.id} />)}</div>}
             </div>
           )}
         </div>
@@ -390,11 +414,12 @@ function SidePanel({ open, onClose, onLoadEntry, onDeleteEntry }: { open: boolea
   )
 }
 
-function EntryCard({ entry, onClick, onDelete, confirming }: { entry: any; onClick: () => void; onDelete: () => void; confirming: boolean }) {
+function EntryCard({ entry, onClick, onDelete, confirming, index }: { entry: any; onClick: () => void; onDelete: () => void; confirming: boolean; index?: number }) {
   const date = new Date(entry.created_at || entry.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
   const tags = [...(entry.emotion_tags || []).slice(0, 2), ...(entry.topic_tags || []).slice(0, 2)]
+  const staggerDelay = (index || 0) * 30
   return (
-    <div className="ecard">
+    <div className="ecard" style={{ animationDelay: `${staggerDelay}ms` }}>
       <div className="ecard-main" onClick={onClick}>
         <div className="ecard-t">{entry.title || 'Untitled'}</div>
         <div className="ecard-meta"><span className="ecard-date">{date}</span>{tags.map((t: string, i: number) => <span key={i} className="tag">{t}</span>)}</div>
@@ -600,6 +625,27 @@ function WritingBlock({ item, onEdit, onClick, onImageResize, onImageFloat, onIm
       />
       {/* Clear float after images */}
       {hasImages && <div style={{ clear: 'both' }} />}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════
+// ERROR BAR — auto-dismiss with progress
+// ═══════════════════════════════════════════
+
+function ErrorBar({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  useEffect(() => {
+    const timer = setTimeout(onDismiss, 6000)
+    return () => clearTimeout(timer)
+  }, [message, onDismiss])
+
+  return (
+    <div className="error-bar" onClick={e => e.stopPropagation()}>
+      <span className="error-text">{message}</span>
+      <button className="error-close" onClick={onDismiss}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+      </button>
+      <div className="error-progress" />
     </div>
   )
 }
@@ -1559,12 +1605,9 @@ export default function Home() {
         <div ref={streamEndRef} />
       </div>
 
-      {/* Error */}
+      {/* Error — auto-dismisses after 6s */}
       {state.error && (
-        <div className="error-bar" onClick={e => e.stopPropagation()}>
-          <span className="error-text">{state.error}</span>
-          <button className="error-close" onClick={() => s({ error: null })}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></button>
-        </div>
+        <ErrorBar message={state.error} onDismiss={() => s({ error: null })} />
       )}
 
       <SidePanel open={state.panelOpen} onClose={() => s({ panelOpen: false })} onLoadEntry={(id) => loadEntry(id)} onDeleteEntry={onDeleteEntry} />
@@ -1625,11 +1668,11 @@ body {
   width: 100%; max-width: 380px; display: flex; flex-direction: column; align-items: center;
   background: var(--input-bg); border: 1px solid var(--divider); border-radius: 24px;
   padding: 48px 36px 40px; box-shadow: 0 8px 40px var(--shadow), 0 1px 3px var(--shadow);
-  opacity: 0; animation: loginCardIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards;
+  opacity: 0; animation: loginCardIn 0.9s cubic-bezier(0.16, 1, 0.3, 1) 0.15s forwards;
 }
 @keyframes loginCardIn {
-  from { opacity: 0; transform: translateY(16px) scale(0.97); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  from { opacity: 0; transform: translateY(20px) scale(0.96); filter: blur(4px); }
+  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
 }
 .login-lock {
   width: 56px; height: 56px; border-radius: 16px; background: var(--accent-bg);
@@ -1690,12 +1733,25 @@ body {
 .login-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 
 /* ═══ Greeting ═══ */
-#greeting-screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 50; background: var(--bg); padding: 24px; transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), transform 0.8s cubic-bezier(0.16, 1, 0.3, 1); cursor: text; }
-#greeting-screen.fading { opacity: 0; transform: translateY(-16px) scale(0.98); pointer-events: none; }
-.greeting-text { font-size: 1.45rem; font-weight: 300; color: var(--text); text-align: center; max-width: 480px; line-height: 1.5; opacity: 0; animation: fadeUp 0.9s ease 0.3s forwards; }
-.greeting-continue { margin-top: 20px; font-family: 'DM Sans', sans-serif; font-size: 0.88rem; color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 8px 16px; border-radius: 10px; transition: color 0.2s, background 0.2s, transform 0.15s; opacity: 0; animation: fadeUp 0.7s ease 0.9s forwards; }
+#greeting-screen {
+  position: fixed; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; z-index: 50;
+  background: var(--bg); padding: 24px; cursor: text;
+  transition: opacity 1s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+              filter 0.8s ease;
+}
+#greeting-screen.fading {
+  opacity: 0;
+  transform: translateY(-20px) scale(0.97);
+  filter: blur(4px);
+  pointer-events: none;
+}
+.greeting-text { font-size: 1.45rem; font-weight: 300; color: var(--text); text-align: center; max-width: 480px; line-height: 1.5; opacity: 0; animation: greetingFadeIn 1.2s cubic-bezier(0.16, 1, 0.3, 1) 0.2s forwards; }
+.greeting-continue { margin-top: 20px; font-family: 'DM Sans', sans-serif; font-size: 0.88rem; color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 8px 16px; border-radius: 10px; transition: color 0.2s, background 0.2s, transform 0.15s; opacity: 0; animation: greetingFadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.8s forwards; }
 .greeting-continue:hover { color: var(--accent); background: var(--hover-bg); transform: translateY(-1px); }
-.greeting-hint { margin-top: 48px; font-family: 'DM Sans', sans-serif; font-size: 0.72rem; color: var(--text-light); letter-spacing: 0.05em; opacity: 0; animation: fadeUp 0.6s ease 1.4s forwards; text-transform: uppercase; }
+.greeting-hint { margin-top: 48px; font-family: 'DM Sans', sans-serif; font-size: 0.72rem; color: var(--text-light); letter-spacing: 0.05em; opacity: 0; animation: greetingFadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) 1.6s forwards; text-transform: uppercase; }
+@keyframes greetingFadeIn { from { opacity: 0; transform: translateY(12px); filter: blur(2px); } to { opacity: 1; transform: translateY(0); filter: blur(0); } }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ═══ Top Bar ═══ */
@@ -1972,11 +2028,30 @@ body {
 @keyframes aiFade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ═══ Error ═══ */
-.error-bar { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--error-bg); color: white; padding: 12px 18px; border-radius: 14px; font-family: 'DM Sans', sans-serif; font-size: 0.82rem; z-index: 60; display: flex; align-items: center; gap: 14px; box-shadow: 0 4px 24px rgba(0,0,0,0.2); animation: errorSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); max-width: calc(100vw - 32px); cursor: default; }
+.error-bar {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: var(--error-bg); color: white; padding: 12px 18px;
+  border-radius: 14px; font-family: 'DM Sans', sans-serif; font-size: 0.82rem;
+  z-index: 60; display: flex; align-items: center; gap: 14px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+  animation: errorSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  max-width: calc(100vw - 32px); cursor: default;
+  overflow: hidden;
+}
 @keyframes errorSlideIn { from { opacity: 0; transform: translateX(-50%) translateY(16px) scale(0.95); } to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); } }
 .error-text { flex: 1; line-height: 1.4; }
-.error-close { background: none; border: none; color: white; cursor: pointer; opacity: 0.7; display: flex; align-items: center; justify-content: center; padding: 4px; }
+.error-close { background: none; border: none; color: white; cursor: pointer; opacity: 0.7; display: flex; align-items: center; justify-content: center; padding: 4px; transition: opacity 0.15s; }
 .error-close:hover { opacity: 1; }
+.error-progress {
+  position: absolute; bottom: 0; left: 0; right: 0; height: 2px;
+  background: rgba(255,255,255,0.3);
+  animation: errorCountdown 6s linear forwards;
+  transform-origin: left;
+}
+@keyframes errorCountdown {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
 
 /* ═══ Tools ═══ */
 .tool-box { padding: 10px 0 0; }
@@ -2023,7 +2098,15 @@ body {
 .p-empty { color: var(--text-light); font-size: 0.88rem; padding: 40px 0; text-align: center; line-height: 1.6; opacity: 0; animation: fadeUp 0.4s ease 0.1s forwards; }
 .fgrp { margin-bottom: 20px; }
 .fname { font-family: 'DM Sans', sans-serif; font-size: 0.7rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-light); margin-bottom: 6px; padding-left: 4px; display: flex; align-items: center; gap: 6px; }
-.ecard { display: flex; align-items: center; border-radius: 12px; transition: background 0.2s, transform 0.15s; margin-bottom: 2px; }
+.ecard {
+  display: flex; align-items: center; border-radius: 12px;
+  transition: background 0.2s, transform 0.15s; margin-bottom: 2px;
+  animation: ecardIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes ecardIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
 .ecard:hover { background: var(--hover-bg); transform: translateX(2px); }
 .ecard-main { flex: 1; padding: 12px 8px 12px 14px; cursor: pointer; min-width: 0; }
 .ecard-t { font-size: 0.92rem; color: var(--text); margin-bottom: 3px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2191,8 +2274,45 @@ body {
 .import-fetch-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .import-error {
   font-family: 'DM Sans', sans-serif; font-size: 0.78rem; color: var(--error-bg);
-  padding: 8px 12px; background: rgba(192,57,43,0.06); border-radius: 8px;
-  margin-bottom: 12px; animation: fadeUp 0.2s ease;
+  padding: 10px 14px; background: rgba(192,57,43,0.06); border-radius: 10px;
+  margin-bottom: 12px; animation: fadeUp 0.25s ease;
+  display: flex; align-items: flex-start; gap: 8px; line-height: 1.45;
+}
+/* Loading skeleton */
+.import-skeleton {
+  padding: 16px; border: 1px solid var(--divider); border-radius: 14px;
+  animation: fadeUp 0.3s ease;
+}
+.skel-line {
+  height: 12px; border-radius: 6px; background: var(--hover-bg);
+  animation: skelPulse 1.6s ease-in-out infinite;
+}
+.skel-title { width: 60%; margin-bottom: 8px; }
+.skel-count { width: 30%; height: 10px; margin-bottom: 16px; }
+.skel-msg {
+  height: 48px; border-radius: 8px; background: var(--hover-bg);
+  margin-bottom: 8px; animation: skelPulse 1.6s ease-in-out infinite;
+}
+.skel-msg-alt { animation-delay: 0.3s; background: var(--bg-secondary); }
+@keyframes skelPulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.9; }
+}
+/* Success state */
+.import-success {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 40px 20px; text-align: center;
+  animation: successPop 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+  color: var(--accent);
+}
+.import-success span {
+  font-family: 'DM Sans', sans-serif; font-size: 0.88rem; font-weight: 500;
+  color: var(--text-muted);
+}
+@keyframes successPop {
+  0% { opacity: 0; transform: scale(0.8); }
+  50% { transform: scale(1.05); }
+  100% { opacity: 1; transform: scale(1); }
 }
 .import-preview {
   border: 1px solid var(--divider); border-radius: 14px; padding: 16px;
