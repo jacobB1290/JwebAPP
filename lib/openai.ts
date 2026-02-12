@@ -1,10 +1,22 @@
 import OpenAI from 'openai'
 
+// Lazy-init OpenAI client — avoids crashing during build/import when env vars aren't available
 // CRITICAL: Hardcode baseURL to avoid sandbox OPENAI_BASE_URL proxy override
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-  baseURL: 'https://api.openai.com/v1',
-})
+let _openai: OpenAI | null = null
+
+function getOpenAI(): OpenAI {
+  if (!_openai) {
+    const apiKey = process.env.OPENAI_API_KEY
+    if (!apiKey) {
+      throw new Error('Missing OPENAI_API_KEY environment variable')
+    }
+    _openai = new OpenAI({
+      apiKey,
+      baseURL: 'https://api.openai.com/v1',
+    })
+  }
+  return _openai
+}
 
 // ═══════════════════════════════════════
 // FUNCTION CALLING TOOLS (OpenAI standard)
@@ -92,6 +104,7 @@ export async function callLLM(
   messages?: { role: 'system' | 'user' | 'assistant'; content: string }[],
   useTools: boolean = true,
   apiModel?: string,
+  extendedThinking?: boolean,
 ): Promise<any> {
   const msgArray = messages || [
     { role: 'system' as const, content: systemPrompt },
@@ -101,9 +114,19 @@ export async function callLLM(
   const requestParams: any = {
     model: apiModel || 'gpt-5-mini',
     messages: msgArray,
-    temperature: 0.7,
-    max_completion_tokens: 2000,
+    max_completion_tokens: extendedThinking ? 16000 : 2000,
     response_format: { type: 'json_object' },
+  }
+
+  // Extended thinking: use reasoning effort for GPT-5 series
+  if (extendedThinking) {
+    const isGpt52 = apiModel?.includes('5.2')
+    // GPT-5.2 supports 'xhigh' effort; GPT-5-mini supports up to 'high'
+    requestParams.reasoning = { effort: isGpt52 ? 'xhigh' : 'high' }
+    // Remove temperature — reasoning models handle their own
+    delete requestParams.temperature
+  } else {
+    requestParams.temperature = 0.7
   }
 
   // Add tools for the main notebook prompt (not greeting/continuation)
@@ -113,7 +136,7 @@ export async function callLLM(
     requestParams.parallel_tool_calls = false
   }
 
-  const response = await openai.chat.completions.create(requestParams)
+  const response = await getOpenAI().chat.completions.create(requestParams)
 
   const choice = response.choices[0]
   const content = choice?.message?.content || '{}'

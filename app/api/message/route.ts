@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
   if (!validateAuth(request)) return authError()
 
   try {
-    const { text, entryId, sessionMessages, userRequestedResponse, model } = await request.json()
+    const { text, entryId, sessionMessages, userRequestedResponse, model, extendedThinking } = await request.json()
 
     if (!text?.trim()) {
       return NextResponse.json({ error: 'No text provided' }, { status: 400 })
@@ -52,8 +52,8 @@ user_requested_response: ${userRequestedResponse}
 current_entry_id: ${entryId || '(new entry)'}
 timestamp: ${new Date().toISOString()}`
 
-    // Call LLM — route to the selected model (or default)
-    const llmResponse = await callLLM(SYSTEM_PROMPT, llmInput, undefined, true, model)
+    // Call LLM — route to the selected model (or default), with optional extended thinking
+    const llmResponse = await callLLM(SYSTEM_PROMPT, llmInput, undefined, true, model, extendedThinking)
 
     let responses = llmResponse.responses || []
 

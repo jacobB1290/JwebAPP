@@ -4,14 +4,16 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start -p 3000"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",
+    "@sparticuz/chromium-min": "^143.0.4",
     "@supabase/supabase-js": "^2.95.0",
     "next": "^16.1.0",
     "openai": "^6.18.0",
+    "puppeteer-core": "^24.37.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

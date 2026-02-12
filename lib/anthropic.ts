@@ -1,8 +1,18 @@
 import Anthropic from '@anthropic-ai/sdk'
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY!,
-})
+// Lazy-init Anthropic client — avoids crashing during build/import when env vars aren't available
+let _anthropic: Anthropic | null = null
+
+function getAnthropic(): Anthropic {
+  if (!_anthropic) {
+    const apiKey = process.env.ANTHROPIC_API_KEY
+    if (!apiKey) {
+      throw new Error('Missing ANTHROPIC_API_KEY environment variable')
+    }
+    _anthropic = new Anthropic({ apiKey })
+  }
+  return _anthropic
+}
 
 // ═══════════════════════════════════════
 // TOOL DEFINITIONS — Anthropic native format
@@ -98,6 +108,7 @@ export async function callLLM(
   messages?: { role: 'system' | 'user' | 'assistant'; content: string }[],
   useTools: boolean = true,
   apiModel?: string,
+  extendedThinking?: boolean,
 ): Promise<any> {
   // Anthropic uses system as a separate top-level param, not a message
   let system = systemPrompt
@@ -141,12 +152,27 @@ export async function callLLM(
     sanitized.unshift({ role: 'user', content: userContent || 'hello' })
   }
 
-  const requestParams: Anthropic.MessageCreateParams = {
-    model: apiModel || 'claude-haiku-4-5-20251001',
+  const requestParams: any = {
+    model: apiModel || 'claude-haiku-4-5-20241022',
     system,
     messages: sanitized,
-    max_tokens: 2000,
-    temperature: 0.7,
+    max_tokens: extendedThinking ? 16000 : 2000,
+  }
+
+  // Extended thinking: use adaptive thinking for Opus 4.6, budget_tokens for older models
+  if (extendedThinking) {
+    const isOpus46 = apiModel?.includes('opus-4-6')
+    if (isOpus46) {
+      // Opus 4.6 uses adaptive thinking with effort levels
+      requestParams.thinking = { type: 'adaptive', effort: 'high' }
+    } else {
+      // Haiku 4.5, Sonnet 4.5 use extended thinking with budget_tokens
+      requestParams.thinking = { type: 'enabled', budget_tokens: 10000 }
+    }
+    // Extended thinking is incompatible with temperature
+    delete requestParams.temperature
+  } else {
+    requestParams.temperature = 0.7
   }
 
   // Add tools for main notebook prompt
@@ -155,7 +181,7 @@ export async function callLLM(
     requestParams.tool_choice = { type: 'auto' }
   }
 
-  const response = await anthropic.messages.create(requestParams)
+  const response = await getAnthropic().messages.create(requestParams)
 
   // Parse Anthropic response — it returns content blocks (text + tool_use)
   let textContent = ''
