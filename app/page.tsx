@@ -14,6 +14,9 @@ interface ImageAttachment {
   uploading?: boolean  // true while server upload in progress
   naturalW?: number    // intrinsic pixel width for aspect ratio
   naturalH?: number    // intrinsic pixel height for aspect ratio
+  // ─── Drag positioning (offset from natural flow) ───
+  dragX?: number
+  dragY?: number
 }
 
 interface StreamItem {
@@ -44,6 +47,7 @@ interface ModelOption {
   label: string
   provider: string
   available: boolean
+  supportsThinking?: boolean
 }
 
 interface AppState {
@@ -64,6 +68,7 @@ interface AppState {
   model: string
   models: ModelOption[]
   modelPickerOpen: boolean
+  extendedThinking: boolean
   streamFadeMs: number
   importOpen: boolean
 }
@@ -226,93 +231,205 @@ function chartColor(i: number, a: number) {
 function ImportPanel({ open, onClose, onImported }: { open: boolean; onClose: () => void; onImported: (entryId: string) => void }) {
   const [url, setUrl] = useState('')
   const [loading, setLoading] = useState(false)
+  const [loadingPhase, setLoadingPhase] = useState('') // For animated loading messages
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<any>(null)
   const [importing, setImporting] = useState(false)
   const [success, setSuccess] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const prevOpenRef = useRef(false)
+  const phaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Reset state when panel opens, focus input after slide-in
   useEffect(() => {
-    if (open) { setUrl(''); setError(''); setPreview(null); setSuccess(false); setImporting(false); setTimeout(() => inputRef.current?.focus(), 250) }
+    if (open && !prevOpenRef.current) {
+      setUrl(''); setError(''); setPreview(null); setSuccess(false)
+      setImporting(false); setLoading(false); setLoadingPhase(''); setImportPhase('')
+      const timer = setTimeout(() => inputRef.current?.focus(), 480)
+      return () => clearTimeout(timer)
+    }
+    prevOpenRef.current = open
   }, [open])
 
+  // Cleanup phase timer on unmount
+  useEffect(() => {
+    return () => { if (phaseTimerRef.current) clearTimeout(phaseTimerRef.current) }
+  }, [])
+
+  const isValidUrl = (text: string) => {
+    try {
+      const u = new URL(text.trim())
+      return u.hostname.includes('genspark.ai') || u.hostname.includes('gemini.google.com')
+    } catch { return false }
+  }
+
+  const getSourceName = (text: string) => {
+    try {
+      const u = new URL(text.trim())
+      if (u.hostname.includes('gemini.google.com')) return 'Gemini'
+      return 'Genspark'
+    } catch { return 'conversation' }
+  }
+
   const handleFetch = async () => {
-    if (!url.trim()) return
+    const trimmed = url.trim()
+    if (!trimmed || !isValidUrl(trimmed)) {
+      setError('Please enter a valid Genspark or Gemini conversation URL')
+      return
+    }
+
     setLoading(true)
     setError('')
     setPreview(null)
+
+    // Animated loading phases — gives feedback during the ~15s extraction
+    const phases = [
+      'Connecting to page...',
+      'Loading conversation...',
+      'Waiting for page data...',
+      'Extracting messages...',
+      'Almost there...',
+    ]
+    let phaseIdx = 0
+    setLoadingPhase(phases[0])
+    const advancePhase = () => {
+      phaseIdx++
+      if (phaseIdx < phases.length) {
+        setLoadingPhase(phases[phaseIdx])
+        phaseTimerRef.current = setTimeout(advancePhase, phaseIdx === 1 ? 4000 : 3000)
+      }
+    }
+    phaseTimerRef.current = setTimeout(advancePhase, 2000)
+
     try {
       const res = await fetch('/api/import/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ url: trimmed }),
       })
       const data = await res.json()
-      if (!res.ok) { setError(data.error || 'Failed to fetch conversation'); setLoading(false); return }
+
+      if (phaseTimerRef.current) { clearTimeout(phaseTimerRef.current); phaseTimerRef.current = null }
+
+      if (!res.ok) {
+        setError(data.error || 'Could not load conversation')
+        setLoading(false)
+        return
+      }
       setPreview(data)
     } catch {
+      if (phaseTimerRef.current) { clearTimeout(phaseTimerRef.current); phaseTimerRef.current = null }
       setError('Could not reach the server. Check your connection and try again.')
     }
     setLoading(false)
+    setLoadingPhase('')
   }
+
+  const [importPhase, setImportPhase] = useState('')
 
   const handleImport = async () => {
     if (!preview) return
     setImporting(true)
+    setImportPhase('Saving messages...')
     setError('')
+
+    // Show processing phases — the save endpoint now also runs LLM processing
+    const phaseTimer = setTimeout(() => setImportPhase('Analyzing conversation...'), 2000)
+    const phaseTimer2 = setTimeout(() => setImportPhase('Extracting tags & context...'), 5000)
+    const phaseTimer3 = setTimeout(() => setImportPhase('Almost done...'), 8000)
+
     try {
       const res = await fetch('/api/import/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url.trim(), messages: preview.messages, title: preview.title }),
+        body: JSON.stringify({ messages: preview.messages, title: preview.title }),
       })
+      clearTimeout(phaseTimer); clearTimeout(phaseTimer2); clearTimeout(phaseTimer3)
       const data = await res.json()
-      if (!res.ok) { setError(data.error || 'Failed to import'); setImporting(false); return }
+      if (!res.ok) { setError(data.error || 'Failed to import'); setImporting(false); setImportPhase(''); return }
       setSuccess(true)
+      setImportPhase('')
       setTimeout(() => {
         onImported(data.entryId)
         onClose()
       }, 800)
     } catch {
+      clearTimeout(phaseTimer); clearTimeout(phaseTimer2); clearTimeout(phaseTimer3)
       setError('Connection lost during import. Your data is safe — try again.')
     }
     setImporting(false)
+    setImportPhase('')
   }
 
   return (
     <>
       <div className={`panel-bg ${open ? 'open' : ''}`} onClick={onClose} />
-      <div className={`import-panel ${open ? 'open' : ''}`}>
+      <div className={`import-panel ${open ? 'open' : ''}`} onClick={e => e.stopPropagation()}>
         <div className="p-head">
           <span className="p-title">Import Conversation</span>
           <button className="p-close" onClick={onClose}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></button>
         </div>
         <div className="import-body">
-          <p className="import-desc">Paste a shared Genspark conversation link to import it as a notebook entry.</p>
-          <div className="import-input-row">
-            <input
-              ref={inputRef}
-              type="url"
-              className="import-url-input"
-              placeholder="https://www.genspark.ai/..."
-              value={url}
-              onChange={e => setUrl(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleFetch() }}
-              disabled={loading || importing}
-            />
-            <button className="import-fetch-btn" onClick={handleFetch} disabled={loading || !url.trim() || importing}>
-              {loading && !preview ? <svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> : 'Fetch'}
-            </button>
-          </div>
 
-          {error && <div className="import-error"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0}}><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg><span>{error}</span></div>}
+          {/* ─── URL Input ─── */}
+          {!preview && !success && !loading && (
+            <div className="import-mode-content">
+              <div className="import-desc">
+                Paste a conversation link to import the full conversation with all messages preserved.
+              </div>
 
-          {/* Loading skeleton */}
+              <div className="import-input-row">
+                <input
+                  ref={inputRef}
+                  type="url"
+                  className="import-url-input"
+                  placeholder="Paste a Genspark or Gemini share link..."
+                  value={url}
+                  onChange={e => { setUrl(e.target.value); if (error) setError('') }}
+                  onMouseDown={e => e.stopPropagation()}
+                  onFocus={e => e.stopPropagation()}
+                  onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); handleFetch() } }}
+                  disabled={loading}
+                />
+              </div>
+
+              <button className="import-fetch-btn import-full-btn" onClick={handleFetch} disabled={loading || !url.trim()}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                <span>Import conversation</span>
+              </button>
+
+              <div className="import-hint">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0,marginTop:1}}><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                <span>Works with Genspark and Google Gemini shared conversations. Import may take 10-15 seconds.</span>
+              </div>
+            </div>
+          )}
+
+          {/* ─── Loading state with animated phases ─── */}
           {loading && !preview && (
-            <div className="import-skeleton">
-              <div className="skel-line skel-title" />
-              <div className="skel-line skel-count" />
-              <div className="skel-msg" /><div className="skel-msg skel-msg-alt" /><div className="skel-msg" />
+            <div className="import-loading-state">
+              <div className="import-loading-indicator">
+                <div className="import-loading-ring">
+                  <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                    <circle cx="24" cy="24" r="20" stroke="var(--divider)" strokeWidth="3" />
+                    <circle cx="24" cy="24" r="20" stroke="var(--accent)" strokeWidth="3" strokeDasharray="60 66" strokeLinecap="round" className="import-loading-arc" />
+                  </svg>
+                </div>
+                <div className="import-loading-phase" key={loadingPhase}>{loadingPhase}</div>
+              </div>
+              <div className="import-skeleton">
+                <div className="skel-line skel-title" />
+                <div className="skel-line skel-count" />
+                <div className="skel-msg" /><div className="skel-msg skel-msg-alt" /><div className="skel-msg" />
+              </div>
+            </div>
+          )}
+
+          {/* Error */}
+          {error && (
+            <div className="import-error">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0}}><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+              <span>{error}</span>
             </div>
           )}
 
@@ -324,24 +441,43 @@ function ImportPanel({ open, onClose, onImported }: { open: boolean; onClose: ()
             </div>
           )}
 
+          {/* Preview */}
           {preview && !success && (
             <div className="import-preview">
               <div className="import-preview-title">{preview.title || 'Untitled Conversation'}</div>
-              <div className="import-preview-count">{preview.messages?.length || 0} messages found</div>
+              <div className="import-preview-meta">
+                <span className="import-preview-count">{preview.messages?.length || 0} messages</span>
+                {preview.model && <span className="import-preview-model">{preview.model}</span>}
+              </div>
+
+              {/* Compaction recovery notice */}
+              {preview.wasCompacted && preview.compactedMessageCount > 0 && (
+                <div className="import-compacted-notice">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0}}><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="m9 12 2 2 4-4"/></svg>
+                  <span>Recovered {preview.compactedMessageCount} older messages from compacted history</span>
+                </div>
+              )}
+
               <div className="import-preview-msgs">
                 {(preview.messages || []).slice(0, 6).map((m: any, i: number) => (
-                  <div key={i} className={`import-msg ${m.role}`}>
+                  <div key={i} className={`import-msg ${m.role}`} style={{ animationDelay: `${i * 60}ms` }}>
                     <span className="import-msg-role">{m.role === 'user' ? 'You' : 'AI'}</span>
-                    <span className="import-msg-text">{m.content.slice(0, 150)}{m.content.length > 150 ? '...' : ''}</span>
+                    <span className="import-msg-text">{(typeof m.content === 'string' ? m.content : '').slice(0, 150)}{(typeof m.content === 'string' && m.content.length > 150) ? '...' : ''}</span>
                   </div>
                 ))}
                 {(preview.messages || []).length > 6 && (
                   <div className="import-more">+{preview.messages.length - 6} more messages</div>
                 )}
               </div>
-              <button className="import-save-btn" onClick={handleImport} disabled={importing}>
-                {importing ? <><svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg> Importing...</> : `Import ${preview.messages?.length || 0} messages`}
-              </button>
+              <div className="import-preview-actions">
+                <button className="import-back-btn" onClick={() => { setPreview(null); setError('') }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                  Back
+                </button>
+                <button className="import-save-btn" onClick={handleImport} disabled={importing}>
+                  {importing ? <><svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg><span>{importPhase || 'Importing...'}</span></> : <span>Import {preview.messages?.length || 0} messages</span>}
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -437,21 +573,28 @@ function EntryCard({ entry, onClick, onDelete, confirming, index }: { entry: any
 // INLINE IMAGE — resizable, floatable, lives INSIDE writing blocks
 // ═══════════════════════════════════════════
 
-function InlineImage({ img, onResize, onChangeFloat, onRemove }: {
+function InlineImage({ img, onResize, onChangeFloat, onRemove, onDrag }: {
   img: ImageAttachment
   onResize: (width: number) => void
   onChangeFloat: (float: 'none' | 'left' | 'right') => void
   onRemove: () => void
+  onDrag?: (dx: number, dy: number) => void
 }) {
   const [hovered, setHovered] = useState(false)
   const [resizing, setResizing] = useState(false)
+  const [dragging, setDragging] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [toolbarBelow, setToolbarBelow] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const startXRef = useRef(0)
   const startWidthRef = useRef(0)
+  const dragStartRef = useRef({ x: 0, y: 0, origX: 0, origY: 0 })
 
   const width = img.width || 50
   const float = img.float || 'none'
+  const dragX = img.dragX || 0
+  const dragY = img.dragY || 0
+  const hasDragOffset = dragX !== 0 || dragY !== 0
 
   // Resize via drag — smooth with requestAnimationFrame
   const startResize = (clientX: number) => {
@@ -486,27 +629,81 @@ function InlineImage({ img, onResize, onChangeFloat, onRemove }: {
     window.addEventListener('touchend', cleanup)
   }
 
+  // ─── Drag to reposition ─── with dead-zone to avoid accidental drags
+  const startDrag = (clientX: number, clientY: number) => {
+    if (!onDrag) return
+    const startPos = { x: clientX, y: clientY }
+    let isDragging = false
+    dragStartRef.current = { x: clientX, y: clientY, origX: dragX, origY: dragY }
+
+    let raf: number | null = null
+    const DRAG_THRESHOLD = 5 // px dead-zone before drag starts
+    const onMove = (x: number, y: number) => {
+      if (!isDragging) {
+        const dist = Math.sqrt((x - startPos.x) ** 2 + (y - startPos.y) ** 2)
+        if (dist < DRAG_THRESHOLD) return
+        isDragging = true
+        setDragging(true)
+      }
+      if (raf) cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        const dx = x - dragStartRef.current.x + dragStartRef.current.origX
+        const dy = y - dragStartRef.current.y + dragStartRef.current.origY
+        onDrag(dx, dy)
+      })
+    }
+
+    const handleMouseMove = (e: MouseEvent) => { e.preventDefault(); onMove(e.clientX, e.clientY) }
+    const handleTouchMove = (e: TouchEvent) => onMove(e.touches[0].clientX, e.touches[0].clientY)
+    const cleanup = () => {
+      setDragging(false)
+      if (raf) cancelAnimationFrame(raf)
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', cleanup)
+      window.removeEventListener('touchmove', handleTouchMove)
+      window.removeEventListener('touchend', cleanup)
+    }
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', cleanup)
+    window.addEventListener('touchmove', handleTouchMove)
+    window.addEventListener('touchend', cleanup)
+  }
+
   const floatClass = float === 'left' ? 'img-float-left' : float === 'right' ? 'img-float-right' : 'img-float-center'
+
+  // Detect if toolbar would be clipped at top of viewport
+  const checkToolbarPosition = () => {
+    if (!containerRef.current) return
+    const rect = containerRef.current.getBoundingClientRect()
+    // If the top of the image is within 60px of viewport top, flip toolbar below
+    setToolbarBelow(rect.top < 60)
+  }
 
   return (
     <div
       ref={containerRef}
-      className={`inline-img ${floatClass} ${resizing ? 'is-resizing' : ''} ${loaded ? 'is-loaded' : ''} ${img.uploading ? 'is-uploading' : ''}`}
-      style={{ width: `${width}%` }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { if (!resizing) setHovered(false) }}
+      className={`inline-img ${floatClass} ${resizing ? 'is-resizing' : ''} ${dragging ? 'is-dragging' : ''} ${loaded ? 'is-loaded' : ''} ${img.uploading ? 'is-uploading' : ''} ${toolbarBelow ? 'toolbar-below' : ''}`}
+      style={{ 
+        width: `${width}%`,
+        ...(hasDragOffset ? { transform: `translate(${dragX}px, ${dragY}px)` } : {}),
+      }}
+      onMouseEnter={() => { checkToolbarPosition(); setHovered(true) }}
+      onMouseLeave={() => { if (!resizing && !dragging) setHovered(false) }}
       onClick={e => e.stopPropagation()}
     >
       {/* Upload shimmer overlay */}
       {img.uploading && <div className="img-upload-shimmer" />}
 
-      {/* The image */}
+      {/* The image — drag handle */}
       <img
         src={img.url}
         alt=""
         draggable={false}
         onLoad={() => setLoaded(true)}
         className={`inline-img-el ${loaded ? 'revealed' : ''}`}
+        onMouseDown={e => { e.preventDefault(); e.stopPropagation(); startDrag(e.clientX, e.clientY) }}
+        onTouchStart={e => { e.stopPropagation(); startDrag(e.touches[0].clientX, e.touches[0].clientY) }}
+        style={{ cursor: dragging ? 'grabbing' : 'grab' }}
       />
 
       {/* Resize handle — right edge */}
@@ -541,6 +738,19 @@ function InlineImage({ img, onResize, onChangeFloat, onRemove }: {
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="14" y="3" width="8" height="8" rx="1"/><line x1="2" y1="4" x2="10" y2="4"/><line x1="2" y1="8" x2="10" y2="8"/><line x1="2" y1="16" x2="22" y2="16"/><line x1="2" y1="20" x2="22" y2="20"/></svg>
         </button>
+        {/* Reset position button — only when dragged */}
+        {hasDragOffset && (
+          <>
+            <div className="img-tb-sep" />
+            <button
+              className="img-tb-btn"
+              onClick={e => { e.stopPropagation(); onDrag?.(0, 0) }}
+              title="Reset position"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg>
+            </button>
+          </>
+        )}
         <div className="img-tb-sep" />
         <button
           className="img-tb-btn img-tb-delete"
@@ -561,13 +771,14 @@ function InlineImage({ img, onResize, onChangeFloat, onRemove }: {
 // EDITABLE WRITING BLOCK — with integrated image support
 // ═══════════════════════════════════════════
 
-function WritingBlock({ item, onEdit, onClick, onImageResize, onImageFloat, onImageRemove }: {
+function WritingBlock({ item, onEdit, onClick, onImageResize, onImageFloat, onImageRemove, onImageDrag }: {
   item: StreamItem
   onEdit: (newContent: string) => void
   onClick?: (e: React.MouseEvent) => void
   onImageResize?: (imgId: string, width: number) => void
   onImageFloat?: (imgId: string, float: 'none' | 'left' | 'right') => void
   onImageRemove?: (imgId: string) => void
+  onImageDrag?: (imgId: string, dx: number, dy: number) => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const internalContent = useRef(item.content)
@@ -610,6 +821,7 @@ function WritingBlock({ item, onEdit, onClick, onImageResize, onImageFloat, onIm
           onResize={w => onImageResize?.(img.id, w)}
           onChangeFloat={f => onImageFloat?.(img.id, f)}
           onRemove={() => onImageRemove?.(img.id)}
+          onDrag={(dx, dy) => onImageDrag?.(img.id, dx, dy)}
         />
       ))}
       <div
@@ -664,6 +876,7 @@ export default function Home() {
     model: typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-haiku-4.5') : 'claude-haiku-4.5',
     models: [],
     modelPickerOpen: false,
+    extendedThinking: typeof window !== 'undefined' ? localStorage.getItem('sn-thinking') === 'true' : false,
     streamFadeMs: 0,
     importOpen: false,
   })
@@ -681,6 +894,7 @@ export default function Home() {
   const processingRef = useRef(false)
   const continuationCheckedRef = useRef(false)
   const modelRef = useRef(typeof window !== 'undefined' ? (localStorage.getItem('sn-model') || 'claude-haiku-4.5') : 'claude-haiku-4.5')
+  const thinkingRef = useRef(typeof window !== 'undefined' ? localStorage.getItem('sn-thinking') === 'true' : false)
   const exitingRef = useRef(false)
 
   const s = useCallback((update: Partial<AppState> | ((prev: AppState) => AppState)) => {
@@ -694,6 +908,7 @@ export default function Home() {
   useEffect(() => { entryIdRef.current = state.entryId }, [state.entryId])
   useEffect(() => { continuationCheckedRef.current = state.continuationChecked }, [state.continuationChecked])
   useEffect(() => { modelRef.current = state.model }, [state.model])
+  useEffect(() => { thinkingRef.current = state.extendedThinking }, [state.extendedThinking])
 
   // ─── Theme — follows system preference ───
   useEffect(() => {
@@ -734,6 +949,8 @@ export default function Home() {
         const data = await res.json()
         s({ authed: true, loading: false, greeting: data.greeting || 'Write something.', recentEntryId: data.recentEntryId, recentEntryTopic: data.recentEntryTopic })
         loadModels()
+        // Background: process any unprocessed imported conversations
+        processUnprocessedImports()
       } else if (res.status === 401) {
         s({ authed: false, loading: false })
       } else {
@@ -745,18 +962,50 @@ export default function Home() {
 
   const onLogin = async () => { s({ loading: true }); await checkAuth() }
 
+  // ─── Background: process unprocessed imported conversations ───
+  // Fires silently after auth; if there are imported entries that weren't
+  // analyzed (e.g., LLM was unavailable during import), process them now.
+  // Keeps calling until no unprocessed entries remain, with a delay between batches.
+  const processUnprocessedImports = async () => {
+    try {
+      const res = await fetch('/api/import/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      if (data.processed > 0) {
+        console.log(`[import] Processed ${data.processed} imported conversation(s)`)
+        // If there are more remaining, process the next batch after a delay
+        if (data.remaining > 0) {
+          setTimeout(processUnprocessedImports, 3000)
+        }
+      }
+    } catch {
+      // Silent — this is a background enhancement, not critical
+    }
+  }
+
   const setModel = (id: string) => {
     s({ model: id, modelPickerOpen: false })
     localStorage.setItem('sn-model', id)
   }
 
+  const toggleThinking = () => {
+    const next = !state.extendedThinking
+    s({ extendedThinking: next })
+    localStorage.setItem('sn-thinking', next ? 'true' : 'false')
+  }
+
   const scrollToBottom = () => { setTimeout(() => streamEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 80) }
 
   const focusInput = useCallback(() => {
+    if (state.importOpen || state.panelOpen) return
     if (state.greetingVisible) s({ greetingVisible: false })
     if (state.modelPickerOpen) s({ modelPickerOpen: false })
     setTimeout(() => inputRef.current?.focus(), 50)
-  }, [state.greetingVisible, state.modelPickerOpen, s])
+  }, [state.greetingVisible, state.modelPickerOpen, state.importOpen, state.panelOpen, s])
 
   // ─── New entry — with exit animation ───
   const newEntry = () => {
@@ -983,6 +1232,17 @@ export default function Home() {
     }))
   }
 
+  const handleImageDrag = (itemUid: string, imgId: string, dx: number, dy: number) => {
+    s(prev => ({
+      ...prev,
+      stream: prev.stream.map(item =>
+        item.uid === itemUid
+          ? { ...item, images: item.images?.map(i => i.id === imgId ? { ...i, dragX: dx, dragY: dy } : i) }
+          : item
+      ),
+    }))
+  }
+
   // ─── Load entry — MERGE into current thread, don't replace ───
   const loadEntry = async (entryId: string, isMerge?: boolean) => {
     try {
@@ -991,19 +1251,48 @@ export default function Home() {
       const data = await res.json()
       if (!data.entry) return
 
+      const totalMsgs = (data.messages || []).length
+      // For very long conversations, skip per-item animation entirely
+      // and use a single smooth fade-in instead.
+      const useGroupFade = totalMsgs > 40
       const items: StreamItem[] = (data.messages || []).map((m: any, idx: number) => {
         const itemUid = uid()
+        // Extract inline images from markdown-style ![image](url) in content
+        const imageRegex = /!\[image\]\(([^)]+)\)/g
+        let contentText = m.content || ''
+        const extractedImages: ImageAttachment[] = []
+        let imgMatch
+        while ((imgMatch = imageRegex.exec(contentText)) !== null) {
+          extractedImages.push({
+            id: `img-${itemUid}-${extractedImages.length}`,
+            url: imgMatch[1],
+            width: 60,
+            float: 'none',
+          })
+        }
+        // Strip image markdown from text for cleaner display
+        if (extractedImages.length > 0) {
+          contentText = contentText.replace(/!\[image\]\([^)]+\)\n?/g, '').trim()
+        }
+        // Reverse waterfall: last message animates first (delay 0),
+        // earlier messages get progressively longer delays → fade cascades upward.
+        // Cap the animated window so very long conversations don't stall.
+        const ANIM_WINDOW = 12 // only the last 12 items get staggered animation
+        const STAGGER_MS = 25 // per-item stagger
+        const reverseIdx = totalMsgs - 1 - idx
+        const stagger = useGroupFade ? 0 : (reverseIdx < ANIM_WINDOW ? reverseIdx * STAGGER_MS : ANIM_WINDOW * STAGGER_MS)
         return {
           uid: itemUid,
           id: m.id,
           type: m.sender === 'user' ? 'writing' as const : m.message_type === 'annotation' ? 'ai-annotation' as const : 'ai-conversational' as const,
-          content: m.content,
+          content: contentText,
           tone: m.tone,
           linked_entry_id: m.linked_entry_id,
           tool_call: m.tool_call,
-          animating: true,
-          waveDelay: idx * 80,
-          originalContent: m.sender === 'user' ? m.content : undefined,
+          animating: !useGroupFade,
+          waveDelay: stagger,
+          originalContent: m.sender === 'user' ? contentText : undefined,
+          ...(extractedImages.length > 0 ? { images: extractedImages } : {}),
         }
       })
 
@@ -1043,10 +1332,10 @@ export default function Home() {
             stream: prev.stream.map((item, i) => ({
               ...item,
               exiting: true,
-              exitDelay: i * 25,
+              exitDelay: i * 20,
             })),
           }))
-          const exitDuration = Math.min(streamRef.current.length * 25, 300) + 400
+          const exitDuration = Math.min(streamRef.current.length * 15, 180) + 280
           await new Promise(resolve => setTimeout(resolve, exitDuration))
           exitingRef.current = false
         }
@@ -1054,7 +1343,6 @@ export default function Home() {
         allTextRef.current = items.filter(i => i.type === 'writing').map(i => i.content).join('\n\n')
         lastSentRef.current = allTextRef.current
         setInput('')
-        const fadeDuration = items.length * 80 + 400
         s({
           entryId,
           stream: items,
@@ -1063,14 +1351,28 @@ export default function Home() {
           greetingVisible: false,
           entryTitle: data.entry.title || null,
           continuationChecked: true,
-          streamFadeMs: fadeDuration,
+          streamFadeMs: useGroupFade ? 500 : 0,
         })
 
-        const totalWaveDuration = items.length * 80 + 500
+        // Instantly jump to bottom BEFORE paint so user sees the latest messages.
+        // Use double-rAF to ensure React has committed the DOM, then jump.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' as ScrollBehavior })
+            inputRef.current?.focus()
+          })
+        })
+
+        // Clear animating flags after the wave animation completes
+        // so stale CSS classes don't interfere with later interactions.
+        const maxDelay = useGroupFade ? 500 : Math.min(12 * 25, 300) + 350
         setTimeout(() => {
-          streamEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
-          inputRef.current?.focus()
-        }, totalWaveDuration)
+          s(prev => ({
+            ...prev,
+            stream: prev.stream.map(item => ({ ...item, animating: false, waveDelay: undefined })),
+            streamFadeMs: 0,
+          }))
+        }, maxDelay)
       }
     } catch {}
   }
@@ -1179,6 +1481,7 @@ export default function Home() {
           sessionMessages: recentContext,
           userRequestedResponse: userRequested,
           model: modelRef.current,
+          extendedThinking: thinkingRef.current,
         }),
       })
 
@@ -1381,7 +1684,10 @@ export default function Home() {
         <div className="topbar-right">
           <div className="model-picker-wrap" onClick={e => e.stopPropagation()}>
             <button className="tbtn model-btn" onClick={() => s({ modelPickerOpen: !state.modelPickerOpen })} title="Change AI model">
-              <span className="model-badge">{(state.models.find(m => m.id === state.model) || { label: 'Haiku' }).label}</span>
+              <span className="model-badge">
+                {(state.models.find(m => m.id === state.model) || { label: 'Haiku' }).label}
+                {state.extendedThinking && <span className="thinking-dot" title="Extended thinking active" />}
+              </span>
             </button>
             {state.modelPickerOpen && (
               <div className="model-dropdown">
@@ -1402,6 +1708,10 @@ export default function Home() {
                           <span className="model-opt-label">Sonnet 4.5</span>
                           {state.model === 'claude-sonnet-4.5' && <span className="model-check">&#10003;</span>}
                         </button>
+                        <button className={`model-opt ${state.model === 'claude-opus-4.6' ? 'active' : ''}`} onClick={() => setModel('claude-opus-4.6')}>
+                          <span className="model-opt-label">Opus 4.6</span>
+                          {state.model === 'claude-opus-4.6' && <span className="model-check">&#10003;</span>}
+                        </button>
                         <div className="model-group-divider" />
                         <div className="model-group-label">GPT</div>
                         <button className={`model-opt ${state.model === 'gpt-5-mini' ? 'active' : ''}`} onClick={() => setModel('gpt-5-mini')}>
@@ -1411,6 +1721,14 @@ export default function Home() {
                         <button className={`model-opt ${state.model === 'gpt-5.2' ? 'active' : ''}`} onClick={() => setModel('gpt-5.2')}>
                           <span className="model-opt-label">GPT-5.2</span>
                           {state.model === 'gpt-5.2' && <span className="model-check">&#10003;</span>}
+                        </button>
+                        <div className="model-group-divider" />
+                        <button className={`model-opt thinking-toggle ${state.extendedThinking ? 'active' : ''}`} onClick={toggleThinking}>
+                          <span className="model-opt-label">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                            Extended Thinking
+                          </span>
+                          <span className={`thinking-pill ${state.extendedThinking ? 'on' : ''}`}>{state.extendedThinking ? 'ON' : 'OFF'}</span>
                         </button>
                       </>
                     )
@@ -1441,6 +1759,14 @@ export default function Home() {
                           ))}
                         </>
                       )}
+                      <div className="model-group-divider" />
+                      <button className={`model-opt thinking-toggle ${state.extendedThinking ? 'active' : ''}`} onClick={toggleThinking}>
+                        <span className="model-opt-label">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                          Extended Thinking
+                        </span>
+                        <span className={`thinking-pill ${state.extendedThinking ? 'on' : ''}`}>{state.extendedThinking ? 'ON' : 'OFF'}</span>
+                      </button>
                     </>
                   )
                 })()}
@@ -1466,12 +1792,12 @@ export default function Home() {
 
       {/* Canvas */}
       <div id="canvas">
-        <div id="stream" className={state.streamFadeMs > 0 ? 'stream-fade' : ''} style={state.streamFadeMs > 0 ? { animationDuration: `${state.streamFadeMs}ms` } as React.CSSProperties : undefined}>
+        <div id="stream" className={state.streamFadeMs > 0 ? 'stream-group-fade' : ''} style={state.streamFadeMs > 0 ? { animationDuration: `${state.streamFadeMs}ms` } as React.CSSProperties : {}}>
           {state.stream.map((item, i) => {
             const waveStyle = item.animating && item.waveDelay != null
               ? { animationDelay: `${item.waveDelay}ms` } as React.CSSProperties
               : item.animating
-              ? { animationDelay: `${Math.min(i * 40, 600)}ms` } as React.CSSProperties
+              ? { animationDelay: `${Math.min(i * 30, 400)}ms` } as React.CSSProperties
               : {}
 
             const exitStyle = item.exiting
@@ -1505,6 +1831,7 @@ export default function Home() {
                     onImageResize={(imgId, w) => handleImageResize(item.uid, imgId, w)}
                     onImageFloat={(imgId, f) => handleImageFloat(item.uid, imgId, f)}
                     onImageRemove={(imgId) => handleImageRemove(item.uid, imgId)}
+                    onImageDrag={(imgId, dx, dy) => handleImageDrag(item.uid, imgId, dx, dy)}
                   />
                   {isProcessing && (
                     <div className="writing-processing">
@@ -1772,6 +2099,30 @@ body {
   font-family: 'DM Sans', sans-serif; font-size: 0.62rem; font-weight: 500;
   letter-spacing: 0.04em; color: var(--text-muted); background: var(--tag-bg);
   padding: 3px 8px; border-radius: 6px; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.thinking-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  display: inline-block; animation: thinkingPulse 1.8s ease-in-out infinite;
+}
+@keyframes thinkingPulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+/* Thinking toggle in model dropdown */
+.thinking-toggle .model-opt-label {
+  display: flex; align-items: center; gap: 6px;
+}
+.thinking-toggle .model-opt-label svg { opacity: 0.5; transition: opacity 0.2s; }
+.thinking-toggle.active .model-opt-label svg { opacity: 1; color: var(--accent); }
+.thinking-pill {
+  font-family: 'DM Sans', sans-serif; font-size: 0.58rem; font-weight: 600;
+  letter-spacing: 0.06em; padding: 2px 8px; border-radius: 10px;
+  background: var(--divider); color: var(--text-light);
+  transition: all 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.thinking-pill.on {
+  background: var(--accent); color: white;
 }
 .model-dropdown {
   position: absolute; top: 100%; right: 0; margin-top: 4px;
@@ -1807,8 +2158,14 @@ body {
 /* ═══ Canvas ═══ */
 #canvas { max-width: 680px; width: 100%; margin: 0 auto; padding: 64px 24px 120px; min-height: 100dvh; }
 #stream { display: flex; flex-direction: column; gap: 2px; }
-#stream.stream-fade { animation: streamFadeIn ease both; }
-@keyframes streamFadeIn { 0% { opacity: 0; } 100% { opacity: 1; } }
+/* Group fade for long conversations — single smooth fade-in instead of per-item waterfall */
+#stream.stream-group-fade {
+  animation: streamGroupFadeIn 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes streamGroupFadeIn {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
 
 /* ═══ Stream Items ═══ */
 
@@ -1817,9 +2174,10 @@ body {
   position: relative;
   border-radius: 6px;
   transition: background 0.4s ease, box-shadow 0.4s ease;
+  overflow: visible;
 }
-.si-writing-wrap.wave-in { animation: waterfallIn 0.4s ease both; }
-.si-writing-wrap.stream-exit { animation: streamExit 0.35s ease forwards; }
+.si-writing-wrap.wave-in { animation: waterfallIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.si-writing-wrap.stream-exit { animation: streamExit 0.22s cubic-bezier(0.4, 0, 1, 1) forwards; }
 
 /* Processing state — subtle ambient glow */
 .si-writing-wrap.is-processing {
@@ -1846,7 +2204,7 @@ body {
   padding: 2px 0 4px;
   min-height: 1.6em;
 }
-.writing-block.has-images { overflow: hidden; }
+.writing-block.has-images { overflow: visible; }
 
 .writing-block-text {
   white-space: pre-wrap;
@@ -1906,21 +2264,21 @@ body {
 
 /* User writing — non-editable fallback (loaded from past) */
 .si-writing { padding: 0 0 4px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.15s ease; }
-.si-writing.wave-in { animation: waterfallIn 0.4s ease both; }
-.si-writing.stream-exit { animation: streamExit 0.35s ease forwards; }
+.si-writing.wave-in { animation: waterfallIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.si-writing.stream-exit { animation: streamExit 0.22s cubic-bezier(0.4, 0, 1, 1) forwards; }
 
 /* Merged header */
 .si-merge-header { display: flex; align-items: center; gap: 12px; margin: 20px 0 16px; cursor: default; }
-.si-merge-header.wave-in { animation: waterfallIn 0.4s ease both; }
-.si-merge-header.stream-exit { animation: streamExit 0.35s ease forwards; }
+.si-merge-header.wave-in { animation: waterfallIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.si-merge-header.stream-exit { animation: streamExit 0.22s cubic-bezier(0.4, 0, 1, 1) forwards; }
 .merge-line { flex: 1; height: 1px; background: var(--divider); }
 .merge-label { font-family: 'DM Sans', sans-serif; font-size: 0.65rem; color: var(--text-light); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; padding: 2px 0; }
 
 /* AI Annotation */
 .si-annotation { display: flex; gap: 0; margin: 10px 0 14px; cursor: default; }
-.si-annotation.wave-in { animation: waterfallIn 0.4s ease both; }
-.si-annotation.ai-reveal { animation: aiRevealIn 0.65s cubic-bezier(0.16, 1, 0.3, 1) both; }
-.si-annotation.stream-exit { animation: streamExit 0.35s ease forwards; }
+.si-annotation.wave-in { animation: waterfallIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.si-annotation.ai-reveal { animation: aiRevealIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.si-annotation.stream-exit { animation: streamExit 0.22s cubic-bezier(0.4, 0, 1, 1) forwards; }
 .anno-bar { width: 3px; border-radius: 2px; background: var(--annotation-border); opacity: 0.4; flex-shrink: 0; transition: opacity 0.3s; }
 .si-annotation:hover .anno-bar { opacity: 0.7; }
 .anno-body { padding: 4px 0 4px 14px; font-size: 0.84rem; color: var(--text-muted); line-height: 1.6; }
@@ -1937,20 +2295,20 @@ body {
   transition: border-color 0.3s ease, box-shadow 0.3s ease;
 }
 .si-conv:hover { border-color: var(--divider); }
-.si-conv.wave-in { animation: waterfallIn 0.4s ease both; }
-.si-conv.ai-reveal { animation: aiRevealIn 0.65s cubic-bezier(0.16, 1, 0.3, 1) both; }
-.si-conv.stream-exit { animation: streamExit 0.35s ease forwards; }
+.si-conv.wave-in { animation: waterfallIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.si-conv.ai-reveal { animation: aiRevealIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.si-conv.stream-exit { animation: streamExit 0.22s cubic-bezier(0.4, 0, 1, 1) forwards; }
 
 /* AI Reveal — elegant height+opacity entrance */
 @keyframes aiRevealIn {
   0% {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(10px);
     clip-path: inset(0 0 100% 0);
   }
-  40% {
-    opacity: 0.6;
-    clip-path: inset(0 0 40% 0);
+  30% {
+    opacity: 0.4;
+    clip-path: inset(0 0 60% 0);
   }
   100% {
     opacity: 1;
@@ -1983,14 +2341,14 @@ body {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-/* ═══ Waterfall & Exit Animations — refined ═══ */
+/* ═══ Waterfall & Exit Animations — reverse waterfall (bottom-up, items rise into view) ═══ */
 @keyframes waterfallIn {
-  0% { opacity: 0; transform: translateY(6px); }
+  0% { opacity: 0; transform: translateY(12px); }
   100% { opacity: 1; transform: translateY(0); }
 }
 @keyframes streamExit {
   0% { opacity: 1; transform: translateY(0) scale(1); }
-  100% { opacity: 0; transform: translateY(-6px) scale(0.98); }
+  100% { opacity: 0; transform: translateY(-4px) scale(0.99); }
 }
 
 .conv-text { white-space: pre-wrap; word-break: break-word; }
@@ -2083,10 +2441,24 @@ body {
 .cal-title { color: var(--text-muted); }
 
 /* ═══ Panel ═══ */
-.panel-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.18); z-index: 200; opacity: 0; pointer-events: none; transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+.panel-bg {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.18); z-index: 200;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  will-change: opacity;
+}
 .panel-bg.open { opacity: 1; pointer-events: all; }
-.panel { position: fixed; top: 0; right: -420px; width: 380px; max-width: 90vw; height: 100dvh; background: var(--panel-bg); border-left: 1px solid var(--panel-border); z-index: 201; transition: right 0.45s cubic-bezier(0.16,1,0.3,1); overflow-y: auto; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; cursor: default; }
-.panel.open { right: 0; }
+.panel {
+  position: fixed; top: 0; right: 0; width: 380px; max-width: 90vw; height: 100dvh;
+  background: var(--panel-bg); border-left: 1px solid var(--panel-border); z-index: 201;
+  transform: translateX(100%);
+  transition: transform 0.45s cubic-bezier(0.16,1,0.3,1);
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column; cursor: default;
+  will-change: transform;
+}
+.panel.open { transform: translateX(0); }
 .p-head { display: flex; justify-content: space-between; align-items: center; padding: 20px 20px 16px; padding-top: max(20px, env(safe-area-inset-top)); border-bottom: 1px solid var(--divider); flex-shrink: 0; }
 .p-title { font-family: 'DM Sans', sans-serif; font-size: 0.8rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
 .p-close { background: none; border: none; cursor: pointer; color: var(--text-muted); padding: 8px; border-radius: 8px; transition: background 0.15s; display: flex; align-items: center; justify-content: center; }
@@ -2120,33 +2492,42 @@ body {
 /* ═══ Inline Images — inside writing blocks with real text wrapping ═══ */
 .inline-img {
   position: relative;
-  border-radius: 10px;
+  border-radius: 12px;
   overflow: visible;
   cursor: default;
-  transition: box-shadow 0.3s ease, opacity 0.4s ease;
-  animation: imgFadeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  transition: box-shadow 0.3s ease, opacity 0.4s ease, transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: imgFadeIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  z-index: 1;
+  margin-bottom: 8px;
 }
 @keyframes imgFadeIn {
-  from { opacity: 0; transform: scale(0.95); }
-  to { opacity: 1; transform: scale(1); }
+  from { opacity: 0; transform: scale(0.92) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
 }
-.inline-img:hover { box-shadow: 0 4px 24px var(--shadow-md); }
-.inline-img.is-resizing { user-select: none; z-index: 10; }
+.inline-img:hover { box-shadow: 0 6px 28px var(--shadow-md); }
+.inline-img.is-resizing { user-select: none; z-index: 10; transition: box-shadow 0.15s ease; }
+.inline-img.is-dragging { 
+  user-select: none; z-index: 30; 
+  transition: box-shadow 0.15s ease, opacity 0.15s ease;
+  box-shadow: 0 12px 40px var(--shadow-md), 0 0 0 2px var(--accent-light);
+  opacity: 0.92;
+}
 .inline-img.is-uploading { opacity: 0.7; }
 
 /* Image element */
 .inline-img-el {
   width: 100%; height: auto; display: block;
-  border-radius: 10px;
+  border-radius: 12px;
   opacity: 0;
-  transition: opacity 0.4s ease, border-radius 0.2s ease;
+  transition: opacity 0.4s ease, border-radius 0.2s ease, transform 0.15s ease;
 }
 .inline-img-el.revealed { opacity: 1; }
+.inline-img.is-dragging .inline-img-el { transform: scale(1.01); }
 
 /* Float positioning — the key to text wrapping */
-.inline-img.img-float-center { display: block; margin: 8px auto; }
-.inline-img.img-float-left { float: left; margin: 4px 18px 10px 0; }
-.inline-img.img-float-right { float: right; margin: 4px 0 10px 18px; }
+.inline-img.img-float-center { display: block; margin: 10px auto; }
+.inline-img.img-float-left { float: left; margin: 6px 20px 12px 0; }
+.inline-img.img-float-right { float: right; margin: 6px 0 12px 20px; }
 
 /* Upload shimmer */
 .img-upload-shimmer {
@@ -2165,11 +2546,12 @@ body {
   100% { background-position: -200% 0; }
 }
 
-/* Resize handle — elegant edge grip */
+/* Resize handle — elegant edge grip, wider hit area */
 .img-resize {
-  position: absolute; right: -6px; top: 8px; bottom: 8px; width: 14px;
+  position: absolute; right: -6px; top: 0; bottom: 0; width: 24px;
   cursor: col-resize; display: flex; align-items: center; justify-content: center;
-  opacity: 0; transition: opacity 0.25s ease;
+  opacity: 0; transition: opacity 0.2s ease;
+  z-index: 5;
 }
 .inline-img:hover .img-resize,
 .inline-img.is-resizing .img-resize { opacity: 1; }
@@ -2201,17 +2583,25 @@ body {
   to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 }
 
-/* Floating toolbar */
+/* Floating toolbar — positioned above image */
 .img-toolbar {
-  position: absolute; top: -40px; left: 50%;
+  position: absolute; bottom: calc(100% + 6px); left: 50%;
   transform: translateX(-50%) translateY(4px);
-  display: flex; gap: 2px; padding: 4px;
+  display: flex; gap: 2px; padding: 5px;
   background: var(--panel-bg); border: 1px solid var(--divider);
-  border-radius: 12px;
-  box-shadow: 0 4px 20px var(--shadow-md), 0 1px 3px var(--shadow);
+  border-radius: 14px;
+  box-shadow: 0 6px 24px var(--shadow-md), 0 1px 3px var(--shadow);
   opacity: 0; pointer-events: none;
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-  white-space: nowrap; z-index: 20;
+  transition: opacity 0.2s cubic-bezier(0.22, 1, 0.36, 1), transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  white-space: nowrap; z-index: 30;
+}
+/* When the image is near the top of viewport, flip toolbar below */
+.inline-img.toolbar-below .img-toolbar {
+  bottom: auto; top: calc(100% + 6px);
+  transform: translateX(-50%) translateY(-4px);
+}
+.inline-img.toolbar-below .img-toolbar.visible {
+  transform: translateX(-50%) translateY(0);
 }
 .img-toolbar.visible {
   opacity: 1; pointer-events: all;
@@ -2243,45 +2633,63 @@ body {
 
 /* ═══ Import Panel ═══ */
 .import-panel {
-  position: fixed; top: 0; right: -480px; width: 440px; max-width: 95vw; height: 100dvh;
+  position: fixed; top: 0; right: 0; width: 440px; max-width: 95vw; height: 100dvh;
   background: var(--panel-bg); border-left: 1px solid var(--panel-border); z-index: 201;
-  transition: right 0.45s cubic-bezier(0.16,1,0.3,1); overflow-y: auto;
-  -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; cursor: default;
+  transform: translateX(100%);
+  transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column; cursor: default;
+  will-change: transform;
 }
-.import-panel.open { right: 0; }
-.import-body { flex: 1; overflow-y: auto; padding: 20px; }
-.import-desc {
-  font-family: 'DM Sans', sans-serif; font-size: 0.82rem; color: var(--text-muted);
-  line-height: 1.5; margin-bottom: 16px;
+.import-panel.open { transform: translateX(0); }
+.import-body {
+  flex: 1; overflow-y: auto; padding: 20px;
+  opacity: 0; transform: translateY(8px);
+  transition: opacity 0.35s ease 0.15s, transform 0.35s ease 0.15s;
 }
-.import-input-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.import-panel.open .import-body {
+  opacity: 1; transform: translateY(0);
+}
+.import-input-row {
+  display: flex; gap: 8px; margin-bottom: 12px;
+  opacity: 0; animation: importModeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.15s both;
+}
 .import-url-input {
   flex: 1; border: 1px solid var(--input-border); border-radius: 10px;
   padding: 10px 14px; font-family: 'DM Sans', sans-serif; font-size: 0.82rem;
-  background: var(--bg); color: var(--text); outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  background: var(--input-bg); color: var(--text); outline: none;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, background 0.25s ease;
+  position: relative; z-index: 1;
+  -webkit-appearance: none;
 }
-.import-url-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(196,119,90,0.08); }
+.import-url-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(196,119,90,0.1);
+  background: var(--input-bg);
+}
 .import-url-input::placeholder { color: var(--text-light); }
 .import-fetch-btn {
   padding: 10px 18px; border-radius: 10px; border: none;
   background: var(--accent); color: white; cursor: pointer;
   font-family: 'DM Sans', sans-serif; font-size: 0.8rem; font-weight: 500;
-  transition: all 0.2s; white-space: nowrap;
+  transition: background 0.25s ease, opacity 0.25s ease, transform 0.15s ease;
+  white-space: nowrap;
   display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
 }
-.import-fetch-btn:hover { background: #b86a4f; }
-.import-fetch-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.import-fetch-btn:hover { background: #b86a4f; transform: translateY(-1px); }
+.import-fetch-btn:active { transform: scale(0.97); }
+.import-fetch-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .import-error {
   font-family: 'DM Sans', sans-serif; font-size: 0.78rem; color: var(--error-bg);
   padding: 10px 14px; background: rgba(192,57,43,0.06); border-radius: 10px;
-  margin-bottom: 12px; animation: fadeUp 0.25s ease;
+  margin-bottom: 12px; animation: fadeUp 0.35s cubic-bezier(0.16, 1, 0.3, 1);
   display: flex; align-items: flex-start; gap: 8px; line-height: 1.45;
 }
 /* Loading skeleton */
 .import-skeleton {
   padding: 16px; border: 1px solid var(--divider); border-radius: 14px;
-  animation: fadeUp 0.3s ease;
+  animation: fadeUp 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .skel-line {
   height: 12px; border-radius: 6px; background: var(--hover-bg);
@@ -2302,7 +2710,7 @@ body {
 .import-success {
   display: flex; flex-direction: column; align-items: center; gap: 12px;
   padding: 40px 20px; text-align: center;
-  animation: successPop 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: successPop 0.55s cubic-bezier(0.16, 1, 0.3, 1);
   color: var(--accent);
 }
 .import-success span {
@@ -2310,20 +2718,23 @@ body {
   color: var(--text-muted);
 }
 @keyframes successPop {
-  0% { opacity: 0; transform: scale(0.8); }
-  50% { transform: scale(1.05); }
-  100% { opacity: 1; transform: scale(1); }
+  0% { opacity: 0; transform: scale(0.85) translateY(10px); filter: blur(2px); }
+  50% { transform: scale(1.02) translateY(-2px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); filter: blur(0); }
 }
 .import-preview {
   border: 1px solid var(--divider); border-radius: 14px; padding: 16px;
-  animation: fadeUp 0.3s ease;
+  animation: importPreviewIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes importPreviewIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .import-preview-title {
   font-size: 1rem; font-weight: 500; color: var(--text); margin-bottom: 4px;
 }
 .import-preview-count {
   font-family: 'DM Sans', sans-serif; font-size: 0.72rem; color: var(--text-muted);
-  margin-bottom: 14px;
 }
 .import-preview-msgs {
   max-height: 300px; overflow-y: auto; margin-bottom: 14px;
@@ -2331,6 +2742,11 @@ body {
 }
 .import-msg {
   padding: 8px 12px; border-radius: 8px; font-size: 0.82rem; line-height: 1.5;
+  opacity: 0; animation: importMsgIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes importMsgIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .import-msg.user { background: var(--bg-secondary); }
 .import-msg.assistant { background: var(--conv-bg); }
@@ -2349,10 +2765,108 @@ body {
   background: var(--accent); color: white; cursor: pointer;
   font-family: 'DM Sans', sans-serif; font-size: 0.82rem; font-weight: 500;
   display: flex; align-items: center; justify-content: center; gap: 8px;
-  transition: all 0.2s;
+  transition: background 0.25s ease, opacity 0.25s ease, transform 0.15s ease;
 }
-.import-save-btn:hover { background: #b86a4f; }
+.import-save-btn:hover { background: #b86a4f; transform: translateY(-1px); }
+.import-save-btn:active { transform: scale(0.98); }
 .import-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Description text */
+.import-desc {
+  font-family: 'DM Sans', sans-serif; font-size: 0.82rem; color: var(--text-muted);
+  line-height: 1.55; margin-bottom: 18px;
+  opacity: 0; animation: importModeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
+}
+
+/* Mode content animated transition */
+.import-mode-content {
+  animation: importModeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes importModeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Full-width import button */
+.import-full-btn {
+  width: 100%; margin-bottom: 14px;
+  opacity: 0; animation: importModeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.2s both;
+}
+
+/* Info hint below button */
+.import-hint {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-family: 'DM Sans', sans-serif; font-size: 0.72rem; color: var(--text-light);
+  line-height: 1.5;
+  opacity: 0; animation: importModeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+}
+.import-hint svg { color: var(--text-light); }
+
+/* Loading state with animated ring and phases */
+.import-loading-state {
+  display: flex; flex-direction: column; gap: 20px;
+  animation: importModeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.import-loading-indicator {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  padding: 20px 0 8px;
+}
+.import-loading-ring {
+  animation: fadeIn 0.3s ease;
+}
+.import-loading-arc {
+  transform-origin: center;
+  animation: loadingArcSpin 1.2s linear infinite;
+}
+@keyframes loadingArcSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.import-loading-phase {
+  font-family: 'DM Sans', sans-serif; font-size: 0.82rem; color: var(--text-muted);
+  text-align: center; letter-spacing: 0.01em;
+  animation: phaseChange 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes phaseChange {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Preview meta row (count + model badge) */
+.import-preview-meta {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 14px;
+}
+.import-compacted-notice {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-radius: 8px;
+  background: rgba(130, 170, 110, 0.12);
+  color: #6a9a50;
+  font-family: 'DM Sans', sans-serif; font-size: 0.72rem; font-weight: 500;
+  margin-bottom: 12px;
+  animation: fadeInUp 0.3s ease;
+}
+.import-preview-model {
+  font-family: 'DM Sans', sans-serif; font-size: 0.62rem; font-weight: 500;
+  letter-spacing: 0.04em; color: var(--text-light); background: var(--tag-bg);
+  padding: 2px 8px; border-radius: 6px; white-space: nowrap;
+}
+
+/* Preview actions row */
+.import-preview-actions {
+  display: flex; gap: 8px; align-items: center;
+}
+.import-preview-actions .import-save-btn { flex: 1; }
+.import-back-btn {
+  display: flex; align-items: center; gap: 4px;
+  padding: 10px 14px; border-radius: 10px; border: 1px solid var(--divider);
+  background: none; cursor: pointer;
+  font-family: 'DM Sans', sans-serif; font-size: 0.78rem; font-weight: 500;
+  color: var(--text-muted); white-space: nowrap;
+  transition: all 0.25s ease;
+}
+.import-back-btn:hover { background: var(--hover-bg); border-color: var(--text-light); }
+.import-back-btn:active { transform: scale(0.97); }
 
 /* ═══ Mobile ═══ */
 @media (max-width: 680px) {
